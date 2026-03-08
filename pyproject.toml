@@ -1,0 +1,44 @@
+[project]
+name = "prediction-market-bots"
+version = "0.1.0"
+description = "Automated trading bots for Kalshi prediction markets"
+requires-python = ">=3.9"
+dependencies = [
+    "httpx>=0.27",
+    "tenacity>=9.0",
+    "cryptography>=42.0",
+    "websockets>=14.0,<16.0",
+    "pydantic-settings>=2.6",
+    "aiosqlite>=0.20",
+]
+
+[tool.setuptools.packages.find]
+include = ["bots*", "shared*", "scripts*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["E501", "E402", "F841"]  # Analysis scripts
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true

@@ -1,0 +1,12 @@
+venv/
+.env
+data/
+.git/
+__pycache__/
+*.pyc
+tests/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+VPS-DEPLOY-PROMPT.md

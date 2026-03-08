@@ -1,0 +1,42 @@
+services:
+  bot:
+    build: .
+    command: python -m bots.kalshi_crypto.main --series all
+    restart: always
+    env_file: .env
+    environment:
+      - TZ=America/Chicago
+    volumes:
+      - ./data:/app/data
+
+  collector-btc:
+    build: .
+    command: python scripts/collect_rounds.py --series KXBTC15M --hours 8760
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+
+  collector-eth:
+    build: .
+    command: python scripts/collect_rounds.py --series KXETH15M --hours 8760
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+
+  collector-sol:
+    build: .
+    command: python scripts/collect_rounds.py --series KXSOL15M --hours 8760
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+
+  collector-xrp:
+    build: .
+    command: python scripts/collect_rounds.py --series KXXRP15M --hours 8760
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data
