@@ -17,13 +17,6 @@ class Outcome(str, Enum):
     NO = "no"
 
 
-class OrderType(str, Enum):
-    GTC = "gtc"  # Good till cancelled
-    GTD = "gtd"  # Good till date
-    FOK = "fok"  # Fill or kill
-    FAK = "fak"  # Fill and kill (IOC)
-
-
 class OrderStatus(str, Enum):
     PENDING = "pending"
     OPEN = "open"
@@ -57,10 +50,8 @@ class OrderRequest:
     market_id: str  # Kalshi ticker
     side: Side
     outcome: Outcome
-    price: Decimal  # Limit price in dollars (0.01 - 0.99), used for sizing even if market order
+    price: Decimal  # Limit price in dollars (0.01 - 0.99)
     size: Decimal  # Number of contracts
-    order_type: OrderType = OrderType.GTC
-    market_order: bool = False  # If True, use market order (fills at best price)
     client_order_id: str | None = None
 
 

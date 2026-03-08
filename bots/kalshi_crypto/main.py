@@ -136,7 +136,9 @@ async def run_bot(
         mode = "PAPER"
         logger.info("Mode: PAPER trading ($50 initial)")
     else:
-        engine = KalshiExecutionEngine(client)
+        engine = KalshiExecutionEngine(
+            client, price_cushion_cents=settings.price_cushion_cents,
+        )
         shadow_engine = PaperExecutionEngine(initial_balance=Decimal("50"))
         mode = "LIVE"
         logger.info("Mode: LIVE trading (shadow paper engine active)")
@@ -761,8 +763,6 @@ async def _execute_signal(
             return False, "no liquidity"
 
     signal.order.size = Decimal(str(size))
-    signal.order.market_order = True  # Market order for immediate fill
-
     # Risk check
     result = await risk.check(signal.order, engine)
     if not result.allowed:
@@ -820,22 +820,30 @@ async def _execute_signal(
             kill_switch.record_error()
             return False, f"order failed: {error_detail}"
 
-        # If order is resting (not immediately filled), wait briefly then cancel
-        if response.status in (OrderStatus.OPEN, OrderStatus.PENDING):
+        # IOC: order cancelled with no fills means price moved away
+        if response.status == OrderStatus.CANCELLED and (
+            not response.filled_size or response.filled_size == 0
+        ):
             logger.info(
-                "Order resting (not filled): %s — waiting 5s",
-                response.order_id,
+                "IOC order cancelled (no fill) — price moved from %s: %s",
+                signal.order.price, response.order_id,
             )
-            await asyncio.sleep(5)
-            # Cancel the resting order
-            cancelled = await engine.cancel_order(response.order_id)
-            if cancelled:
-                logger.info("Cancelled unfilled order %s", response.order_id)
-            else:
-                logger.info("Order %s may have filled during wait", response.order_id)
             alerts.log_only(
                 "SKIP",
-                f"{coin}: order rested at ${signal.order.price}, cancelled",
+                f"{coin}: IOC no fill at ${signal.order.price} (price moved)",
+            )
+            return False, "IOC no fill"
+
+        # IOC orders should never rest — but handle gracefully if they do
+        if response.status in (OrderStatus.OPEN, OrderStatus.PENDING):
+            logger.warning(
+                "Unexpected resting order %s (IOC should not rest) — cancelling",
+                response.order_id,
+            )
+            await engine.cancel_order(response.order_id)
+            alerts.log_only(
+                "SKIP",
+                f"{coin}: order unexpectedly rested at ${signal.order.price}, cancelled",
             )
             return False, "order not filled"
 

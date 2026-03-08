@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     max_orders_per_min: int = 30
     max_loss_per_trade_pct: float = 25.0  # Max % of balance per trade
 
+    # ---- Execution ----
+    price_cushion_cents: int = 2  # Bid above ask to absorb price movement (IOC fills at best)
+
     # ---- Operational ----
     paper_trading: bool = True  # Start in paper mode by default
     log_format: str = "human"  # "human" or "json"

@@ -2,7 +2,9 @@
 
 Maps OrderRequest to Kalshi's POST /portfolio/orders API.
 Kalshi order fields: ticker, side (yes/no), action (buy/sell), count (int),
-yes_price (1-99 cents), type (limit/market).
+yes_price (1-99 cents). No "type" field — market orders removed Feb 2026.
+Uses time_in_force="immediate_or_cancel" (IOC) so orders fill instantly
+or cancel — no resting orders.
 
 Kalshi response fields (cents): yes_price, no_price, fill_count,
 taker_fill_cost, taker_fees. Status: resting, canceled, executed.
@@ -59,11 +61,21 @@ def _compute_fill_price(result: dict, outcome: str) -> Decimal | None:
 
 
 class KalshiExecutionEngine(AbstractExecutionEngine):
-    def __init__(self, client: KalshiClient) -> None:
+    def __init__(
+        self,
+        client: KalshiClient,
+        price_cushion_cents: int = 2,
+    ) -> None:
         self._client = client
+        self._price_cushion_cents = price_cushion_cents
 
     async def place_order(self, order: OrderRequest) -> OrderResponse:
-        """Place a Kalshi order."""
+        """Place a Kalshi IOC order with price cushion.
+
+        Adds price_cushion_cents above ask (for buys) to absorb price
+        movement during network round trip. IOC fills at best available
+        price, so the cushion only costs extra if the book is thin.
+        """
         kalshi_order = {
             "ticker": order.market_id,
             "side": order.outcome.value,  # "yes" or "no"
@@ -71,38 +83,35 @@ class KalshiExecutionEngine(AbstractExecutionEngine):
             "count": int(order.size),
         }
 
-        if order.market_order:
-            kalshi_order["type"] = "market"
-            logger.info(
-                "Kalshi: placing MARKET order %s %s x%d on %s",
-                order.side.value, order.outcome.value,
-                int(order.size), order.market_id,
-            )
+        price_cents = int(order.price * 100)
+        # Add cushion for buys, subtract for sells
+        if order.side == Side.BUY:
+            price_cents = min(price_cents + self._price_cushion_cents, 99)
         else:
-            price_cents = int(order.price * 100)
-            if price_cents < 1 or price_cents > 99:
-                return OrderResponse(
-                    order_id="",
-                    market_id=order.market_id,
-                    status=OrderStatus.FAILED,
-                    side=order.side,
-                    outcome=order.outcome,
-                    price=order.price,
-                    size=order.size,
-                    raw={"error": f"Price {price_cents}c out of range [1, 99]"},
-                )
-            # Kalshi always wants yes_price — convert NO prices
-            if order.outcome == Outcome.NO:
-                yes_price_cents = 100 - price_cents
-            else:
-                yes_price_cents = price_cents
-            kalshi_order["type"] = "limit"
-            kalshi_order["yes_price"] = yes_price_cents
-            logger.info(
-                "Kalshi: placing LIMIT order %s %s @ %dc (yes_price=%dc) x%d on %s",
-                order.side.value, order.outcome.value,
-                price_cents, yes_price_cents, int(order.size), order.market_id,
+            price_cents = max(price_cents - self._price_cushion_cents, 1)
+        if price_cents < 1 or price_cents > 99:
+            return OrderResponse(
+                order_id="",
+                market_id=order.market_id,
+                status=OrderStatus.FAILED,
+                side=order.side,
+                outcome=order.outcome,
+                price=order.price,
+                size=order.size,
+                raw={"error": f"Price {price_cents}c out of range [1, 99]"},
             )
+        # Kalshi always wants yes_price — convert NO prices
+        if order.outcome == Outcome.NO:
+            yes_price_cents = 100 - price_cents
+        else:
+            yes_price_cents = price_cents
+        kalshi_order["yes_price"] = yes_price_cents
+        kalshi_order["time_in_force"] = "immediate_or_cancel"
+        logger.info(
+            "Kalshi: placing IOC order %s %s @ %dc (yes_price=%dc) x%d on %s",
+            order.side.value, order.outcome.value,
+            price_cents, yes_price_cents, int(order.size), order.market_id,
+        )
 
         if order.client_order_id:
             kalshi_order["client_order_id"] = order.client_order_id
