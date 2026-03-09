@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -109,9 +109,11 @@ class AlertManager:
         coins: list[str],
         balance: Decimal,
     ) -> bool:
+        # Log to file only — no Telegram spam for round starts
         coins_str = ", ".join(coins)
-        body = f"{coins_str} | Balance: <b>${balance:.2f}</b>"
-        return await self._send(f"ROUND {window}", "\U0001f514", body)
+        self._file_log(f"ROUND {window}", f"{coins_str} | Balance: ${balance:.2f}")
+        logger.info("Log-only [ROUND %s]: %s | Balance: $%.2f", window, coins_str, balance)
+        return True
 
     async def round_summary(
         self,
@@ -123,30 +125,39 @@ class AlertManager:
         balance: Decimal,
         shadow_summary: str | None = None,
     ) -> bool:
+        # No Telegram for empty rounds — just file log
+        if total_trades == 0 and total_signals == 0:
+            self._file_log(
+                f"ROUND {window}",
+                f"No signals | Balance: ${balance:.2f}",
+            )
+            logger.info(
+                "Log-only [ROUND %s]: No signals | Balance: $%.2f",
+                window, balance,
+            )
+            return True
+
         if total_trades > 0:
             result_icon = "\u2705" if pnl and pnl > 0 else "\u274c"
-            header = f"{result_icon} {total_trades} trade(s)"
-            lines = "\n".join(coin_lines)
             pnl_str = f"${pnl:+.2f}" if pnl is not None else "$0.00"
+            lines = "\n".join(coin_lines)
             body = (
-                f"{header}\n"
                 f"{lines}\n\n"
                 f"P&L: <b>{pnl_str}</b> | Balance: <b>${balance:.2f}</b>"
             )
-        elif total_signals > 0:
+            header = f"{result_icon} {total_trades} trade(s)"
+        else:
             lines = "\n".join(coin_lines)
             body = (
-                f"{total_signals} signal(s), 0 trades:\n"
                 f"{lines}\n\n"
                 f"Balance: <b>${balance:.2f}</b>"
             )
-        else:
-            body = f"No signals | Balance: <b>${balance:.2f}</b>"
+            header = f"{total_signals} signal(s), 0 fills"
 
         if shadow_summary:
-            body += f"\n\n<i>Shadow: {shadow_summary}</i>"
+            body += f"\n\n<i>Shadow:\n{shadow_summary}</i>"
 
-        return await self._send(f"ROUND {window}", "\U0001f4ca", body)
+        return await self._send(f"ROUND {window} — {header}", "\U0001f4ca", body)
 
     # ---- Trades -------------------------------------------------------
 
@@ -161,10 +172,10 @@ class AlertManager:
         balance: Decimal,
     ) -> bool:
         body = (
-            f"{coin}: {side} {outcome} @ ${price} x{size}\n"
-            f"Cost: <b>${cost:.2f}</b> | Balance: <b>${balance:.2f}</b>"
+            f"<b>{coin}</b>: {side} {outcome} @ <b>${price}</b> x{size}\n"
+            f"Cost: ${cost:.2f} | Balance: <b>${balance:.2f}</b>"
         )
-        return await self._send("TRADE FILLED", "\U0001f4b5", body)
+        return await self._send("FILL", "\U0001f4b5", body)
 
     # ---- Daily summary ------------------------------------------------
 

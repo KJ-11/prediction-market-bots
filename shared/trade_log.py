@@ -31,6 +31,9 @@ class TradeLog:
         "status",
         "fill_price",
         "fill_size",
+        "slippage_cents",
+        "ask_size",
+        "market_volume",
         "balance_after",
     ]
 
@@ -73,10 +76,18 @@ class TradeLog:
         fill_price: Decimal | None = None,
         fill_size: Decimal | None = None,
         balance_after: Decimal | None = None,
+        ask_size: Decimal | None = None,
+        market_volume: Decimal | None = None,
     ) -> None:
         """Log a trade signal and its execution result."""
         writer = self._ensure_file()
         ts = datetime.now(timezone.utc).isoformat()
+
+        # Slippage: how much worse the fill was vs signal price (in cents)
+        slippage_cents: str = ""
+        if fill_price is not None:
+            slippage_cents = str((fill_price - price) * 100)
+
         writer.writerow([
             ts,
             round_ticker,
@@ -91,6 +102,9 @@ class TradeLog:
             status,
             str(fill_price) if fill_price is not None else "",
             str(fill_size) if fill_size is not None else "",
+            slippage_cents,
+            str(ask_size) if ask_size is not None else "",
+            str(market_volume) if market_volume is not None else "",
             str(balance_after) if balance_after is not None else "",
         ])
         if self._file:
@@ -116,6 +130,9 @@ class TradeLog:
             "",
             "",
             f"signals={signals_generated} trades={trades_executed}",
+            "",
+            "",
+            "",
             "",
             "",
             "",

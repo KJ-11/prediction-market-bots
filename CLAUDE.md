@@ -10,6 +10,8 @@ Kalshi short-duration crypto binary markets. Polymarket and cross-platform arb a
 - `tests/` — Test suite
 - `data/trades/` — CSV trade logs (one per day)
 - `data/rounds/` — Collected round snapshots for analysis
+- `data/alerts/` — Daily alert logs (synced from VM via rsync)
+- `data/lifecycle.json` — Bot version lifecycle metadata (deposits, start times, balances)
 - `research/` — Knowledge base: sources index, extracted insights, deep dives
 
 ## Conventions
@@ -29,10 +31,21 @@ Kalshi short-duration crypto binary markets. Polymarket and cross-platform arb a
 - `source venv/bin/activate` — Activate virtualenv
 - `pytest` — Run all tests
 - `python scripts/smoke_test_kalshi.py` — Verify Kalshi connectivity + alerts
+- `python scripts/performance.py` — Performance report (queries Kalshi API, parses alert logs)
+- `python scripts/performance.py --sync` — Same, but rsync alert logs from VM first
 - `ruff check .` — Lint
 
+## Versioning & Performance Tracking
+- Bot versions are git-tagged: `bot-v1`, `bot-v2`, etc. Tag on meaningful strategy/code changes.
+- `data/lifecycle.json` — Tracks bot lifecycle: version, start time, starting balance, deposits, withdrawals
+- `scripts/performance.py` — Performance report using Kalshi API (fills + settlements) as source of truth, alert logs for signal analytics
+- Each version in lifecycle.json has a `start_time_utc` — only fills after this time are counted for that version's P&L
+- When deploying a new bot version: update lifecycle.json with new version entry, tag git (`git tag -a bot-vN -m "description"`)
+
 ## Deployment & Operations
-- GCP VM: `<GCP_ZONE>`, `35.245.140.169`, project `<GCP_PROJECT>`
+- GCP VM: `<GCP_ZONE>`, `35.245.140.169`
+- GCP project: `<GCP_PROJECT>` (named "Bots"), account: `kshjhun@gmail.com`
+  - NOT `profitlabs` — that is a different project with a different account (`<CONTACT_EMAIL>`)
 - 5 Docker services: bot + 4 collectors (btc, eth, sol, xrp)
 - See `OPS.md` for full operations guide (health checks, logs, data, deploy, emergency controls)
 - SSH: `gcloud compute ssh <VM_NAME> --zone=<GCP_ZONE> --project=<GCP_PROJECT>`
@@ -62,10 +75,10 @@ The `research/` directory is our knowledge base:
 
 ## Strategy Principles
 - Spot distance from strike is the signal — not direction, not momentum, not contract divergence
-- T+600-800 is the window — earlier is too noisy, later the contract has caught up
+- T+300-540 is the window — same accuracy as T+600 but prices are ~$0.10 cheaper (not yet repriced)
 - 0.2% distance threshold — below this, prediction accuracy drops to near-random
 - Market reprices faster than expected — median 14-21s lag, not minutes
-- XRP is untradeable — Coinbase spot has zero correlation with CF Benchmarks for XRP
+- XRP added Mar 9 — 92.5% WR in backtest (best coin), was previously excluded due to spot/CF correlation concerns at T+600-800. Monitor closely
 - Cross-coin consensus doesn't work — 57-67% accuracy, negative EV after fees
 - ETH is the best coin — most consistent edge across all windows and thresholds
 - Fees are manageable at extremes — $0.003-0.006 at $0.90+

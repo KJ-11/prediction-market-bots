@@ -1,7 +1,7 @@
 """Kalshi 15-min crypto bot — multi-coin entry point.
 
 Watches BTC, ETH, SOL simultaneously in a single process.
-Uses SpotDistanceStrategy: trades when spot is >0.2% from strike in T+600-800.
+Uses SpotDistanceStrategy: trades when spot is >0.2% from strike in T+300-540.
 
 Usage:
     python -m bots.kalshi_crypto.main --series all
@@ -115,7 +115,7 @@ async def run_bot(
     """Main bot loop: discover -> subscribe -> run strategies -> repeat."""
     # Determine which series to watch
     if series_arg.lower() == "all":
-        series_list = ["KXBTC15M", "KXETH15M", "KXSOL15M"]
+        series_list = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M"]
     else:
         if series_arg not in SERIES_TO_COIN:
             logger.error("Unknown series: %s", series_arg)
@@ -141,7 +141,10 @@ async def run_bot(
         engine = KalshiExecutionEngine(
             client, price_cushion_cents=settings.price_cushion_cents,
         )
-        shadow_engine = PaperExecutionEngine(initial_balance=Decimal("50"))
+        shadow_engine = PaperExecutionEngine(
+            initial_balance=Decimal("50"),
+            balance_file=None,  # Shadow engine: no persistence, always fresh
+        )
         mode = "LIVE"
         logger.info("Mode: LIVE trading (shadow paper engine active)")
 
@@ -213,11 +216,18 @@ async def run_bot(
 
     # Track how long we've been waiting with no active markets (floor_strike timeout)
     no_market_since: float | None = None
+    # Use locally-computed balance for risk checks to avoid Kalshi settlement lag.
+    # engine.get_balance() can show a false drop when contracts are bought but
+    # winnings haven't been credited yet.
+    local_balance: Decimal | None = None
 
     try:
         while not runner.shutdown_requested:
-            # Positions are settled at round end, so balance is accurate
-            balance = await engine.get_balance()
+            # Use local balance if available (accurate), fall back to API
+            if local_balance is not None:
+                balance = local_balance
+            else:
+                balance = await engine.get_balance()
             kill_switch.check(balance)
             breaker.check(balance)
 
@@ -226,7 +236,25 @@ async def run_bot(
                 await alerts.circuit_breaker(
                     f"Daily loss limit hit — balance ${balance:.2f}, stopped for day"
                 )
-                break
+                # Sleep until midnight CST instead of exiting, so Docker
+                # doesn't restart-loop us back into the same breaker state.
+                now = datetime.now(CST)
+                tomorrow = (now + timedelta(days=1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0,
+                )
+                sleep_secs = (tomorrow - now).total_seconds()
+                logger.info(
+                    "Sleeping %.0f seconds until midnight CST reset", sleep_secs,
+                )
+                try:
+                    await asyncio.wait_for(
+                        runner.shutdown_event.wait(), timeout=sleep_secs,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                # After midnight, reset breaker for new day
+                breaker.set_day_start_balance(balance)
+                continue
 
             if breaker.should_skip_round:
                 logger.info("Circuit breaker: skipping round (consecutive losses)")
@@ -304,7 +332,11 @@ async def run_bot(
             any_ctx = next(iter(active_contexts.values()))
             window = _round_window(any_ctx)
             round_coins = [c.coin for c in active_contexts.values()]
-            balance = await engine.get_balance()
+            # Use local balance if available to avoid settlement lag
+            if local_balance is not None:
+                balance = local_balance
+            else:
+                balance = await engine.get_balance()
 
             logger.info(
                 "=== ROUND START: %d markets [%s] ===",
@@ -330,10 +362,13 @@ async def run_bot(
                 trade_log=trade_log,
                 alerts=alerts,
                 window=window,
+                round_start_balance=balance,
             )
 
             # Update circuit breaker and daily stats
-            balance = await engine.get_balance()
+            # Use locally-computed balance (Kalshi API has settlement lag)
+            balance = round_result["balance_after"]
+            local_balance = balance
             if round_result["trades"] > 0:
                 breaker.record_round_result(
                     won=round_result["pnl"] > 0, current_balance=balance,
@@ -378,6 +413,7 @@ async def _run_round(
     trade_log: TradeLog,
     alerts: AlertManager,
     window: str,
+    round_start_balance: Decimal = Decimal("0"),
 ) -> dict:
     """Run all strategies for one 15-min round across all coins.
 
@@ -420,6 +456,7 @@ async def _run_round(
     skip_reasons: dict[str, str] = {}
     # Track live fills for accurate P&L (balance delta is unreliable for live)
     live_fills: list[dict] = []  # [{ticker, outcome, price, size, coin}, ...]
+    shadow_fills: list[dict] = []  # same shape, for shadow engine
     market_results: dict[str, Outcome | None] = {}  # ticker -> winning outcome
 
     try:
@@ -524,11 +561,22 @@ async def _run_round(
                         shadow_order = copy.deepcopy(signal.order)
                         shadow_order.size = Decimal(str(shadow_size))
                         await shadow_engine.place_order(shadow_order)
+                        shadow_fills.append({
+                            "ticker": signal.order.market_id,
+                            "outcome": signal.order.outcome,
+                            "price": signal.order.price,
+                            "size": shadow_order.size,
+                            "coin": coin,
+                        })
+
+                # Grab volume from latest ticker update for logging
+                sig_volume = sig_kalshi.volume if sig_kalshi is not None else None
 
                 executed, skip_reason = await _execute_signal(
                     signal, engine, risk, sizer, balance,
                     kill_switch, trade_log, alerts,
                     available_size=available_size,
+                    market_volume=sig_volume,
                     coin=coin,
                 )
                 if executed:
@@ -622,7 +670,7 @@ async def _run_round(
                             label, ctx.ticker, winning.value, settle_pnl,
                         )
 
-        # Wait for Kalshi to settle live fills before checking balance
+        # Wait for Kalshi to publish market results before fetching them
         if live_fills and not isinstance(engine, PaperExecutionEngine):
             await asyncio.sleep(15)
 
@@ -696,22 +744,51 @@ async def _run_round(
             if coin not in traded_coins:
                 coin_lines.append(f"{coin}: skipped ({reason})")
 
-        balance_after = await engine.get_balance()
+        # Compute balance locally — Kalshi API has settlement lag and
+        # may not reflect won positions yet
+        balance_after = round_start_balance + round_pnl
 
         for ctx in active_contexts.values():
             trade_log.log_round_summary(
                 ctx.ticker, round_signals, round_trades, balance_after,
             )
 
-        # Shadow summary line
+        # Shadow summary line — show per-trade details
         shadow_summary = None
         if shadow_engine is not None:
             shadow_bal = await shadow_engine.get_balance()
-            shadow_pnl = shadow_bal - Decimal("50")
-            if round_trades > 0 or round_signals > 0:
+            if shadow_fills:
+                shadow_lines = []
+                shadow_round_pnl = Decimal("0")
+                for sf in shadow_fills:
+                    winner = market_results.get(sf["ticker"])
+                    if winner is None:
+                        shadow_lines.append(f"{sf['coin']}: result unknown")
+                        continue
+                    sp = sf["price"]
+                    ss = sf["size"]
+                    sf_fee_raw = Decimal("0.07") * ss * sp * (1 - sp)
+                    sf_fee = (sf_fee_raw * 100).to_integral_value() / 100
+                    if sf["outcome"] == winner:
+                        sf_pnl = (1 - sp) * ss - sf_fee
+                        shadow_lines.append(
+                            f"\u2705 {sf['coin']}: {sf['outcome'].value.upper()} "
+                            f"@ ${sp} x{int(ss)} \u2192 +${sf_pnl:.2f}"
+                        )
+                    else:
+                        sf_pnl = -sp * ss - sf_fee
+                        shadow_lines.append(
+                            f"\u274c {sf['coin']}: {sf['outcome'].value.upper()} "
+                            f"@ ${sp} x{int(ss)} \u2192 ${sf_pnl:.2f}"
+                        )
+                    shadow_round_pnl += sf_pnl
+                detail = "\n".join(shadow_lines)
                 shadow_summary = (
-                    f"P&L: ${shadow_pnl:+.2f} | Balance: ${shadow_bal:.2f}"
+                    f"{detail}\n"
+                    f"P&L: ${shadow_round_pnl:+.2f} | Balance: ${shadow_bal:.2f}"
                 )
+            elif round_signals > 0:
+                shadow_summary = f"no trades | ${shadow_bal:.2f}"
             else:
                 shadow_summary = f"no trades | ${shadow_bal:.2f}"
 
@@ -742,6 +819,7 @@ async def _run_round(
         "wins": round_wins,
         "pnl": round_pnl,
         "signals": round_signals,
+        "balance_after": balance_after,
     }
 
 
@@ -755,6 +833,7 @@ async def _execute_signal(
     trade_log: TradeLog,
     alerts: AlertManager,
     available_size: Decimal | None = None,
+    market_volume: Decimal | None = None,
     coin: str = "",
 ) -> tuple[bool, str | None]:
     """Apply sizing and risk checks, then execute a trade signal.
@@ -807,6 +886,8 @@ async def _execute_signal(
             confidence=signal.confidence,
             reason=signal.reason,
             status=f"blocked:{result.reason}",
+            ask_size=available_size,
+            market_volume=market_volume,
         )
         return False, f"risk: {result.reason}"
 
@@ -821,7 +902,16 @@ async def _execute_signal(
         risk.record_order()
         kill_switch.clear_errors()
 
-        new_balance = await engine.get_balance()
+        # Compute cost locally — Kalshi balance API has settlement lag
+        fill_count = int(response.filled_size) if response.filled_size else 0
+        if fill_count > 0:
+            fill_cost = signal.order.price * fill_count
+            fee_raw = Decimal("0.07") * fill_count * signal.order.price * (1 - signal.order.price)
+            fill_fee = (fee_raw * 100).to_integral_value() / 100
+            trade_cost = fill_cost + fill_fee
+            new_balance = balance - trade_cost
+        else:
+            new_balance = balance
 
         trade_log.log_signal(
             round_ticker=round_ticker,
@@ -837,6 +927,8 @@ async def _execute_signal(
             fill_price=response.avg_fill_price,
             fill_size=response.filled_size,
             balance_after=new_balance,
+            ask_size=available_size,
+            market_volume=market_volume,
         )
 
         if response.status == OrderStatus.FAILED:
