@@ -48,9 +48,9 @@ def _kalshi_update(
 
 class TestSpotDistanceStrategy:
     def test_no_signal_before_window(self):
-        """No signals before T+600s."""
+        """No signals before T+300s."""
         strat = SpotDistanceStrategy()
-        ctx = _make_ctx(seconds_elapsed=300)  # T+300
+        ctx = _make_ctx(seconds_elapsed=200)  # T+200
         strat.on_round_start(ctx)
 
         signals = strat.on_update(
@@ -61,9 +61,9 @@ class TestSpotDistanceStrategy:
         assert signals == []
 
     def test_no_signal_after_window(self):
-        """No signals after T+800s."""
+        """No signals after T+540s."""
         strat = SpotDistanceStrategy()
-        ctx = _make_ctx(seconds_elapsed=850)
+        ctx = _make_ctx(seconds_elapsed=600)
         strat.on_round_start(ctx)
 
         signals = strat.on_update(
@@ -74,9 +74,9 @@ class TestSpotDistanceStrategy:
         assert signals == []
 
     def test_signal_yes_in_window(self):
-        """YES signal when spot > strike by >0.2% in T+600-800."""
+        """YES signal when spot > strike by >0.2% in T+300-540."""
         strat = SpotDistanceStrategy()
-        ctx = _make_ctx(seconds_elapsed=650, strike=Decimal("70000"))
+        ctx = _make_ctx(seconds_elapsed=400, strike=Decimal("70000"))
         strat.on_round_start(ctx)
 
         signals = strat.on_update(
@@ -86,12 +86,12 @@ class TestSpotDistanceStrategy:
         )
         assert len(signals) == 1
         assert signals[0].order.outcome == Outcome.YES
-        assert signals[0].confidence == 0.985
+        assert signals[0].confidence == 0.88
 
     def test_signal_no_in_window(self):
-        """NO signal when spot < strike by >0.2% in T+600-800."""
+        """NO signal when spot < strike by >0.2% in T+300-540."""
         strat = SpotDistanceStrategy()
-        ctx = _make_ctx(seconds_elapsed=650, strike=Decimal("70000"))
+        ctx = _make_ctx(seconds_elapsed=400, strike=Decimal("70000"))
         strat.on_round_start(ctx)
 
         signals = strat.on_update(
@@ -105,7 +105,7 @@ class TestSpotDistanceStrategy:
     def test_no_signal_below_threshold(self):
         """No signal when distance < 0.2%."""
         strat = SpotDistanceStrategy()
-        ctx = _make_ctx(seconds_elapsed=650, strike=Decimal("70000"))
+        ctx = _make_ctx(seconds_elapsed=400, strike=Decimal("70000"))
         strat.on_round_start(ctx)
 
         signals = strat.on_update(
@@ -118,7 +118,7 @@ class TestSpotDistanceStrategy:
     def test_one_trade_per_round(self):
         """Only one trade per round."""
         strat = SpotDistanceStrategy()
-        ctx = _make_ctx(seconds_elapsed=650, strike=Decimal("70000"))
+        ctx = _make_ctx(seconds_elapsed=400, strike=Decimal("70000"))
         strat.on_round_start(ctx)
 
         s1 = strat.on_update(
@@ -137,7 +137,7 @@ class TestSpotDistanceStrategy:
     def test_round_reset(self):
         """State resets between rounds."""
         strat = SpotDistanceStrategy()
-        ctx = _make_ctx(seconds_elapsed=650, strike=Decimal("70000"))
+        ctx = _make_ctx(seconds_elapsed=400, strike=Decimal("70000"))
 
         strat.on_round_start(ctx)
         strat.on_update(
@@ -154,7 +154,7 @@ class TestSpotDistanceStrategy:
     def test_no_signal_without_strike(self):
         """No signal when floor_strike is None."""
         strat = SpotDistanceStrategy()
-        ctx = _make_ctx(seconds_elapsed=650)
+        ctx = _make_ctx(seconds_elapsed=400)
         ctx.floor_strike = None
         strat.on_round_start(ctx)
 
@@ -168,7 +168,7 @@ class TestSpotDistanceStrategy:
     def test_no_signal_without_spot(self):
         """No signal when spot price is None."""
         strat = SpotDistanceStrategy()
-        ctx = _make_ctx(seconds_elapsed=650)
+        ctx = _make_ctx(seconds_elapsed=400)
         strat.on_round_start(ctx)
 
         signals = strat.on_update(
@@ -181,7 +181,7 @@ class TestSpotDistanceStrategy:
     def test_no_signal_without_kalshi(self):
         """No signal when kalshi update is None."""
         strat = SpotDistanceStrategy()
-        ctx = _make_ctx(seconds_elapsed=650)
+        ctx = _make_ctx(seconds_elapsed=400)
         strat.on_round_start(ctx)
 
         signals = strat.on_update(ctx, None, Decimal("70500"))

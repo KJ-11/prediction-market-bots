@@ -165,13 +165,13 @@ class TestRiskLimits:
 
 class TestCircuitBreaker:
     def test_no_skip_initially(self):
-        cb = CircuitBreaker(max_consecutive_losses=3)
+        cb = CircuitBreaker(max_consecutive_losses=3, state_file=None)
         cb.set_day_start_balance(Decimal("50"))
         assert not cb.should_skip_round
         assert not cb.stopped_for_day
 
     def test_skip_after_consecutive_losses(self):
-        cb = CircuitBreaker(max_consecutive_losses=3)
+        cb = CircuitBreaker(max_consecutive_losses=3, state_file=None)
         cb.set_day_start_balance(Decimal("50"))
 
         cb.record_round_result(won=False, current_balance=Decimal("48"))
@@ -182,7 +182,7 @@ class TestCircuitBreaker:
         assert cb.should_skip_round
 
     def test_win_resets_consecutive_losses(self):
-        cb = CircuitBreaker(max_consecutive_losses=3)
+        cb = CircuitBreaker(max_consecutive_losses=3, state_file=None)
         cb.set_day_start_balance(Decimal("50"))
 
         cb.record_round_result(won=False, current_balance=Decimal("48"))
@@ -192,7 +192,7 @@ class TestCircuitBreaker:
         assert not cb.should_skip_round
 
     def test_clear_skip(self):
-        cb = CircuitBreaker(max_consecutive_losses=1)
+        cb = CircuitBreaker(max_consecutive_losses=1, state_file=None)
         cb.set_day_start_balance(Decimal("50"))
         cb.record_round_result(won=False, current_balance=Decimal("48"))
         assert cb.should_skip_round
@@ -200,7 +200,7 @@ class TestCircuitBreaker:
         assert not cb.should_skip_round
 
     def test_daily_loss_stops_trading(self):
-        cb = CircuitBreaker(daily_loss_limit_pct=20.0)
+        cb = CircuitBreaker(daily_loss_limit_pct=20.0, state_file=None)
         cb.set_day_start_balance(Decimal("50"))
 
         cb.check(Decimal("45"))  # 10% loss — fine
@@ -211,7 +211,7 @@ class TestCircuitBreaker:
 
     def test_drawdown_triggers_kill_switch(self):
         # Set daily loss limit high so it doesn't interfere with drawdown test
-        cb = CircuitBreaker(max_drawdown_pct=40.0, daily_loss_limit_pct=50.0)
+        cb = CircuitBreaker(max_drawdown_pct=40.0, daily_loss_limit_pct=50.0, state_file=None)
         cb.set_day_start_balance(Decimal("100"))
 
         # ATH is 100
@@ -222,7 +222,7 @@ class TestCircuitBreaker:
             cb.check(Decimal("55"))  # 45% drawdown — kill
 
     def test_ath_updates(self):
-        cb = CircuitBreaker(max_drawdown_pct=40.0)
+        cb = CircuitBreaker(max_drawdown_pct=40.0, state_file=None)
         cb.set_day_start_balance(Decimal("50"))
 
         # Balance grows
@@ -234,3 +234,54 @@ class TestCircuitBreaker:
 
         with pytest.raises(KillSwitchTriggered, match="Drawdown"):
             cb.check(Decimal("40"))  # 42.9% — kill
+
+    def test_persistence_same_day(self, tmp_path):
+        """State persists across restarts on the same day."""
+        state_file = tmp_path / "breaker.json"
+        cb = CircuitBreaker(daily_loss_limit_pct=20.0, state_file=state_file)
+        cb.set_day_start_balance(Decimal("50"))
+
+        # Trigger daily loss stop
+        cb.check(Decimal("39"))
+        assert cb.stopped_for_day
+
+        # Simulate restart — new instance, same file
+        cb2 = CircuitBreaker(daily_loss_limit_pct=20.0, state_file=state_file)
+        cb2.set_day_start_balance(Decimal("39"))  # Current balance on restart
+        # Should still be stopped (same day)
+        assert cb2.stopped_for_day
+
+    def test_persistence_new_day(self, tmp_path):
+        """State resets on a new day."""
+        import json
+
+        state_file = tmp_path / "breaker.json"
+        cb = CircuitBreaker(daily_loss_limit_pct=20.0, state_file=state_file)
+        cb.set_day_start_balance(Decimal("50"))
+        cb.check(Decimal("39"))
+        assert cb.stopped_for_day
+
+        # Manually set saved date to yesterday
+        state = json.loads(state_file.read_text())
+        state["date"] = "2020-01-01"
+        state_file.write_text(json.dumps(state))
+
+        # New instance should reset
+        cb2 = CircuitBreaker(daily_loss_limit_pct=20.0, state_file=state_file)
+        cb2.set_day_start_balance(Decimal("39"))
+        assert not cb2.stopped_for_day
+
+    def test_persistence_consecutive_losses(self, tmp_path):
+        """Consecutive loss count persists across restarts."""
+        state_file = tmp_path / "breaker.json"
+        cb = CircuitBreaker(max_consecutive_losses=3, state_file=state_file)
+        cb.set_day_start_balance(Decimal("50"))
+        cb.record_round_result(won=False, current_balance=Decimal("48"))
+        cb.record_round_result(won=False, current_balance=Decimal("46"))
+
+        # Restart
+        cb2 = CircuitBreaker(max_consecutive_losses=3, state_file=state_file)
+        cb2.set_day_start_balance(Decimal("46"))
+        # One more loss should trigger skip
+        cb2.record_round_result(won=False, current_balance=Decimal("44"))
+        assert cb2.should_skip_round

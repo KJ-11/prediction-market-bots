@@ -15,7 +15,8 @@ import asyncio
 import copy
 import logging
 import sys
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from bots.kalshi_crypto.discovery import (
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 DISCOVERY_INTERVAL = 15.0
 QUEUE_DRAIN_TIMEOUT = 0.5
+FLOOR_STRIKE_TIMEOUT = 300.0  # 5 min max wait for missing floor_strike
 
 
 def parse_args() -> argparse.Namespace:
@@ -209,6 +211,9 @@ async def run_bot(
         name="midnight-summary",
     )
 
+    # Track how long we've been waiting with no active markets (floor_strike timeout)
+    no_market_since: float | None = None
+
     try:
         while not runner.shutdown_requested:
             # Positions are settled at round end, so balance is accurate
@@ -247,7 +252,29 @@ async def run_bot(
             active_contexts = {s: c for s, c in market_map.items() if c is not None}
 
             if not active_contexts:
-                logger.debug("No active markets, waiting %.0fs...", DISCOVERY_INTERVAL)
+                now = time.monotonic()
+                if no_market_since is None:
+                    no_market_since = now
+                waited = now - no_market_since
+                if waited >= FLOOR_STRIKE_TIMEOUT:
+                    logger.warning(
+                        "No active markets for %.0fs (floor_strike timeout), "
+                        "skipping to next round",
+                        waited,
+                    )
+                    no_market_since = None
+                    # Sleep until next 15-min boundary + 30s buffer
+                    utcnow = datetime.now(timezone.utc)
+                    mins_past = utcnow.minute % 15
+                    wait_secs = (15 - mins_past) * 60 - utcnow.second + 30
+                    if wait_secs > 0:
+                        logger.info("Sleeping %.0fs until next round", wait_secs)
+                        await asyncio.sleep(wait_secs)
+                    continue
+                logger.debug(
+                    "No active markets (%.0fs waited), waiting %.0fs...",
+                    waited, DISCOVERY_INTERVAL,
+                )
                 try:
                     await asyncio.wait_for(
                         runner.shutdown_event.wait(), timeout=DISCOVERY_INTERVAL,
@@ -255,6 +282,8 @@ async def run_bot(
                 except asyncio.TimeoutError:
                     pass
                 continue
+            # Reset floor_strike timeout once we find active markets
+            no_market_since = None
 
             # Retry discovery if we found some but not all markets
             # (markets open with slight delays between coins)

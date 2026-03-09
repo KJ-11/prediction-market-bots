@@ -1,4 +1,13 @@
-"""Spot-distance strategy: trade when spot is far from strike in T+600-800."""
+"""Spot-distance strategy: trade when spot is far from strike in T+300-540.
+
+Revised Mar 9, 2026 based on 219-round lifecycle analysis:
+- Directional accuracy is ~85-92% across T+300-600, but prices ramp from
+  $0.85 to $0.95 in that window. The edge is in T+300-540 where accuracy
+  is high enough and prices haven't caught up yet.
+- Confidence set to 0.88 (conservative estimate from observed data).
+- Same-round comparison: T+300 is $0.10/contract cheaper than T+600
+  with nearly identical accuracy (86% vs 88%).
+"""
 
 from __future__ import annotations
 
@@ -8,12 +17,12 @@ from bots.kalshi_crypto.strategy import BaseStrategy, RoundContext, TradeSignal
 from shared.types import OrderRequest, Outcome, PriceUpdate, Side
 
 DIST_THRESHOLD = Decimal("0.002")  # 0.2% minimum distance
-WINDOW_START = 600  # seconds
-WINDOW_END = 800
+WINDOW_START = 300  # seconds into round
+WINDOW_END = 540
 
 
 class SpotDistanceStrategy(BaseStrategy):
-    """Buy YES/NO when spot is >0.2% from strike in the T+600-800 window."""
+    """Buy YES/NO when spot is >0.2% from strike in the T+300-540 window."""
 
     def __init__(self) -> None:
         self._ctx: RoundContext | None = None
@@ -55,16 +64,15 @@ class SpotDistanceStrategy(BaseStrategy):
             outcome = Outcome.NO
             price = kalshi_update.no_ask
             if price is None:
-                # Kalshi: no_ask = 1 - yes_bid (or approximate from yes_ask)
                 if kalshi_update.yes_bid is not None:
                     price = Decimal("1") - kalshi_update.yes_bid
                 else:
                     return []
 
-        # Empirical win rate: 98.5% across all trades passing filters
-        # The filters (dist>0.2%, T+600-800) ARE the edge — once passed,
-        # confidence is the empirical rate, not a function of distance.
-        confidence = 0.985
+        # Conservative confidence from 219-round lifecycle analysis (Mar 8-9).
+        # Observed: 85-92% accuracy in T+300-540 at 0.2%+ distance.
+        # Using 0.88 keeps Kelly sizing small while we validate with more data.
+        confidence = 0.88
         self._traded = True
 
         return [

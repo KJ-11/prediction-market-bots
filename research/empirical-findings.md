@@ -46,7 +46,24 @@
 - Mid crossings (T+300-600): 72-78% stick. Actionable.
 - Late crossings (T+600-800): 67-71% stick.
 
-## 10. Spread by Time
+## 10. Live Trading Results (Mar 8-9, 2026) — STRATEGY FAILED
+
+91 fills across 47 traded rounds over ~36 hours. **34% round win rate, -$64 P&L.**
+
+**Why it failed:**
+- 71% of trades entered at 0.20-0.29% distance (minimum threshold) — weakest signals
+- 30% of entries at $0.95+ — need 95%+ accuracy, impossible at low distance
+- Avg entry price $0.92 — need 92% accuracy to break even, actual ~34%
+- Avg win $2.36, avg loss $3.29 — losses bigger than wins (W/L ratio 0.72)
+- Max loss streak: 7 consecutive rounds
+- Every hour of day was net negative except 3 (02:00, 04:00, 18:00 CST)
+- Fill rate was good (92%) — execution wasn't the problem, signal quality was
+
+**Root cause:** At $0.90+ entry prices, the asymmetric payoff (risk $0.90 to make $0.10) requires near-perfect prediction accuracy. Our 0.2% distance threshold doesn't provide that. The strategy was right about direction more often than not, but wrong just often enough to be catastrophically negative EV.
+
+**Implication:** Either need much higher distance thresholds (0.4%+) with much lower entry prices ($0.70-0.85), or a fundamentally different approach to contract selection and pricing.
+
+## 11. Spread by Time
 | Coin | 0-120s | 120-300s | 300-600s | 600-900s |
 |------|--------|----------|----------|----------|
 | BTC  | $0.014 | $0.015 | $0.014 | $0.012 |
