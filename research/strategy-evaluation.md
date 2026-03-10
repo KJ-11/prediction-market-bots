@@ -11,26 +11,34 @@
 8. **Contract-Confirms-Spot at Mid-Range** — 60-70% win, negative P&L. Fees at $0.50-0.70 entry eat the edge.
 
 ## Validated & Profitable
-9. **Late-Mid-Round Spot Distance (T+600-800, dist>0.2%)** — THE winning strategy
+9. **Late-Mid-Round Spot Distance (T+600-800, dist>0.2%)** — original strategy (pre-v1)
    - BTC: 48 trades, 100% win, +$2.82
    - ETH: 57 trades, 98.2% win, +$2.81
    - SOL: 55 trades, 98.2% win, +$3.37
    - ~$0.05/trade avg, ~21 trades/day, ~$9/day
-10. **ETH Mid-Round (T+300-600, dist>0.2%)** — secondary signal
+10. **ETH Mid-Round (T+300-600, dist>0.2%)** — secondary signal (pre-v1)
     - 49 trades, 91.8% win, +$0.086/trade, +$4.19 total
+11. **bot-v1: T+300-540, dist>0.2%, Kelly 0.25, BTC/ETH/SOL/XRP** — first live version
+    - 56 live trades, 82% WR, -$3.91 P&L (thin edge eaten by losses on SOL)
+    - Backtest (644 rounds): 84.1% WR, EV/contract +$0.049, BE WR 81.6%
+    - SOL dragged results: 79.2% WR vs 88%+ for BTC/ETH
+12. **bot-v2: T+250-500, dist>0.15%, Kelly 0.30, BTC/ETH/XRP** — Mar 10
+    - Backtest (644 rounds, tick-accurate): 83.3% WR, EV/contract +$0.065, BE WR 76.8%
+    - Higher EV despite lower WR — cheaper avg price ($0.76 vs $0.80) fattens profit margin
+    - 95% CI lower bound (79.2%) is 2.4% above break-even (vs 1.3% for v1)
+    - More trades per day = faster compounding
+    - Changes: drop SOL, widen window earlier, lower threshold, bump Kelly 25→30%
     - Higher avg PnL per trade but lower win rate
 
 ## Deferred (Future Bots)
-11. **AI/ML Models** — train on spot trajectory features once we have 500+ rounds
-12. **Whale Detection** — Kalshi exposes full orderbook + trade tape
-13. **Cross-Platform: Polymarket to Kalshi** — on-chain trades visible
-14. **Interactive Telegram Bot** — Two-way Telegram bot for status/control (/status, /balance, /stop, /trades)
-15. **Rust execution layer** — NOT needed for current latency problem. The bottleneck is HTTP round trip to Kalshi API (~100-200ms), not Python processing (~0.1ms). Rust shaves microseconds off strategy evaluation but can't reduce network latency. Becomes relevant only if: (a) competing with other bots on the same WS tick (sub-ms matters), (b) strategy moves to reacting to individual price changes rather than minutes-scale windows, (c) we build a Rust WS client that places orders via WS protocol instead of REST (if Kalshi supports it). Current fix: price cushion + VPS colocation near Kalshi's servers (likely AWS us-east-1) reduces round trip from ~100ms to ~1-5ms — 100x improvement without changing language.
-16. **Order book depth strategy** — Use `yes_bid_size_fp`/`yes_ask_size_fp` from WS and `GET /markets/{ticker}/orderbook` to detect large resting orders, whale positioning, or liquidity vacuums as trading signals
-17. **Multi-level order filling** — Current liquidity cap uses top-of-book size only (WS `yes_ask_size_fp`). Real depth is massive (2k-190k contracts across price levels). At scale (500+ contracts), should walk the book across multiple price levels instead of capping to top-of-book. Use `GET /markets/{ticker}/orderbook` to compute fillable size across levels. Not needed until balance exceeds ~$5k.
-18. **Fill rate improvement (CRITICAL)** — Live orders rest (`status=open`) 100% of the time because the WS price snapshot is stale by the time the HTTP order reaches Kalshi (~100-200ms). The bid/ask moves in that window and our exact-price limit order misses. Root cause analysis:
-    - **NOT Python speed** — strategy eval is ~0.1ms, irrelevant
-    - **NOT order format** — price conversion is correct (verified)
-    - **IS network latency** — HTTP POST round trip ~100-200ms from laptop, bid moves in that time
-    - **Fix priority**: (1) Price cushion: add 1-2 cents above ask, costs $0.01-0.02/contract but fills. (2) VPS colocation: AWS us-east-1 near Kalshi reduces round trip to ~1-5ms. (3) Market orders instead of limit (if Kalshi supports). (4) Track fill rate metric to measure improvement.
-    - Shadow paper engine tracks theoretical P&L assuming instant fills — compare vs live to quantify the cost of latency.
+1. **AI/ML Models** — train on spot trajectory features once we have 500+ rounds
+2. **Whale Detection** — Kalshi exposes full orderbook + trade tape
+3. **Cross-Platform: Polymarket to Kalshi** — on-chain trades visible, different resolution sources (Chainlink vs CF Benchmarks)
+4. **Interactive Telegram Bot** — Two-way Telegram bot for status/control (/status, /balance, /stop, /trades)
+5. **Order book depth strategy** — Use `yes_bid_size_fp`/`yes_ask_size_fp` from WS and `GET /markets/{ticker}/orderbook` to detect large resting orders, whale positioning, or liquidity vacuums as trading signals
+6. **Multi-level order filling** — Walk the book across price levels instead of capping to top-of-book. Not needed until balance exceeds ~$5k.
+7. **Polymarket trading** — see `research/polymarket-roadmap.md` for analysis plan and strategy ideas
+
+## Resolved / No Longer Relevant
+- **Rust execution layer** — NOT needed. Bottleneck is HTTP round trip (~100-200ms), not Python (~0.1ms). Fixed with price cushion + VPS colocation.
+- **Fill rate improvement** — Fixed with IOC orders + 2c price cushion + VPS. Fill rate now 92%+.

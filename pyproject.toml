@@ -1,7 +1,7 @@
 [project]
 name = "prediction-market-bots"
 version = "0.1.0"
-description = "Automated trading bots for Kalshi prediction markets"
+description = "Automated trading bots for Kalshi and Polymarket prediction markets"
 requires-python = ">=3.9"
 dependencies = [
     "httpx>=0.27",
@@ -9,7 +9,6 @@ dependencies = [
     "cryptography>=42.0",
     "websockets>=14.0,<16.0",
     "pydantic-settings>=2.6",
-    "aiosqlite>=0.20",
 ]
 
 [tool.setuptools.packages.find]
@@ -36,7 +35,7 @@ line-length = 100
 select = ["E", "F", "I", "W"]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/*.py" = ["E501", "E402", "F841"]  # Analysis scripts
+"scripts/*.py" = ["E501", "E402", "F541", "F841", "I001", "F401"]  # Analysis scripts: relaxed linting
 
 [tool.mypy]
 python_version = "3.9"

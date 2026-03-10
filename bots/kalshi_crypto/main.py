@@ -1,7 +1,7 @@
 """Kalshi 15-min crypto bot — multi-coin entry point.
 
-Watches BTC, ETH, SOL simultaneously in a single process.
-Uses SpotDistanceStrategy: trades when spot is >0.2% from strike in T+300-540.
+Watches BTC, ETH, XRP simultaneously in a single process.
+Uses SpotDistanceStrategy: trades when spot is >0.15% from strike in T+250-500.
 
 Usage:
     python -m bots.kalshi_crypto.main --series all
@@ -32,7 +32,7 @@ from shared.clients.kalshi import KalshiClient
 from shared.config import Settings
 from shared.execution.kalshi import KalshiExecutionEngine
 from shared.execution.paper import PaperExecutionEngine
-from shared.risk import CircuitBreaker, KillSwitch, RiskLimits
+from shared.risk import CircuitBreaker, KillSwitch, KillSwitchTriggered, RiskLimits
 from shared.runner import BotRunner
 from shared.trade_log import TradeLog
 from shared.types import OrderStatus, Outcome, PriceUpdate
@@ -115,7 +115,7 @@ async def run_bot(
     """Main bot loop: discover -> subscribe -> run strategies -> repeat."""
     # Determine which series to watch
     if series_arg.lower() == "all":
-        series_list = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M"]
+        series_list = ["KXBTC15M", "KXETH15M", "KXXRP15M"]
     else:
         if series_arg not in SERIES_TO_COIN:
             logger.error("Unknown series: %s", series_arg)
@@ -177,7 +177,7 @@ async def run_bot(
     # Position sizer — phased for $50 bankroll
     sizer = PositionSizer(
         mode=SizingMode.FRACTIONAL_KELLY,
-        kelly_fraction=0.25,
+        kelly_fraction=0.30,
     )
 
     # Strategies — one SpotDistanceStrategy per coin
@@ -228,8 +228,35 @@ async def run_bot(
                 balance = local_balance
             else:
                 balance = await engine.get_balance()
-            kill_switch.check(balance)
-            breaker.check(balance)
+            try:
+                kill_switch.check(balance)
+                breaker.check(balance)
+            except KillSwitchTriggered as e:
+                logger.warning("KILL SWITCH: %s", e)
+                await alerts.kill_switch_triggered(str(e))
+                # Sleep until midnight CST instead of exiting, so Docker
+                # doesn't restart-loop us.
+                now = datetime.now(CST)
+                tomorrow = (now + timedelta(days=1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0,
+                )
+                sleep_secs = (tomorrow - now).total_seconds()
+                logger.info(
+                    "Kill switch: sleeping %.0f seconds until midnight CST",
+                    sleep_secs,
+                )
+                try:
+                    await asyncio.wait_for(
+                        runner.shutdown_event.wait(), timeout=sleep_secs,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                # After midnight, reset ATH + breaker for fresh start
+                balance = await engine.get_balance()
+                breaker.reset_ath(balance)
+                breaker.set_day_start_balance(balance)
+                local_balance = None  # Force fresh balance from API
+                continue
 
             if breaker.stopped_for_day:
                 logger.warning("Circuit breaker: stopped for day")

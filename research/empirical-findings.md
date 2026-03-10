@@ -1,6 +1,6 @@
 # Empirical Findings
 
-*Validated with 109+ rounds per coin across 24h collection (Mar 6-7, 2026). Full analysis: `data/analysis/ANALYSIS-2026-03-06.md`*
+*Validated with 109+ rounds per coin across 24h collection (Mar 6-7, 2026). Analysis scripts: `scripts/analyze_rounds.py`, `scripts/analyze_liquidity.py`.*
 
 ## 1. Contract Repricing Speed (REVISED)
 - Market is **faster than originally estimated** — median lag to 0.55/0.45 after crossing is 14-21s (NOT 10 min)
@@ -63,7 +63,23 @@
 
 **Implication:** Either need much higher distance thresholds (0.4%+) with much lower entry prices ($0.70-0.85), or a fundamentally different approach to contract selection and pricing.
 
-## 11. Spread by Time
+## 11. V1 Strategy (T+300-540) — Early Results (Mar 9)
+
+Shifted to T+300-540 window with 0.2% distance threshold. Prices are ~$0.70-0.85 (much cheaper than the $0.90+ from v0).
+
+**10 trades over ~3.2 hours:**
+- 8W/2L (80% WR) — observed, but small sample
+- Net P&L: +$3.02 settled
+- Avg entry: $0.77 | Avg win: $0.99 | Avg loss: $2.46
+- Per-coin: XRP 3W/0L, SOL 4W/1L, ETH 1W/1L, BTC 0 trades
+- Fill rate: 36% (28 signals → 10 fills). 94% of skips = "price too high, no edge"
+- Zero liquidity cap events — books are deep (1k-35k contracts at our prices)
+
+**Key tension:** Sizer uses confidence=0.88 from 219-round backtest. Observed WR is 80% from 10 trades. At 80% WR and $0.77 price, Kelly says 0 contracts (no edge after fees). We're profitable but possibly oversized. Need 50+ trades to resolve.
+
+**Compared to v0 (finding #10):** Night and day. v0 entered at $0.92 avg and lost money at 34% round WR. v1 enters at $0.77 avg — much better risk/reward ratio. Even at 80% WR, individual losses are smaller relative to balance.
+
+## 12. Spread by Time
 | Coin | 0-120s | 120-300s | 300-600s | 600-900s |
 |------|--------|----------|----------|----------|
 | BTC  | $0.014 | $0.015 | $0.014 | $0.012 |

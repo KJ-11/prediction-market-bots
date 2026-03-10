@@ -52,7 +52,6 @@ logging.getLogger("shared.ws.spot").setLevel(logging.WARNING)
 
 SNAPSHOT_INTERVAL = 1.0  # seconds between CSV rows
 DISCOVERY_POLL = 2.0  # seconds between discovery attempts (fast!)
-REST_POLL_INTERVAL = 3.0  # seconds between Kalshi REST polls for bid/ask
 
 CSV_HEADERS = [
     "timestamp",
@@ -208,36 +207,6 @@ class RoundCollector:
         )
 
 
-async def _poll_kalshi_rest(
-    client: KalshiClient,
-    ticker: str,
-    state: dict,
-    stop: asyncio.Event,
-) -> None:
-    """Background task: poll Kalshi REST API every few seconds for bid/ask.
-
-    Fills gaps when the WS doesn't send updates.
-    """
-    while not stop.is_set():
-        try:
-            mkt = await client.fetch_market(ticker)
-            if mkt:
-                from shared.utils.decimals import dec
-
-                state["yes_bid"] = dec(mkt.get("yes_bid_dollars"))
-                state["yes_ask"] = dec(mkt.get("yes_ask_dollars"))
-                state["no_bid"] = dec(mkt.get("no_bid_dollars"))
-                state["no_ask"] = dec(mkt.get("no_ask_dollars"))
-                state["volume"] = dec(mkt.get("volume_fp"))
-        except Exception as e:
-            logger.debug("REST poll error: %s", e)
-
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=REST_POLL_INTERVAL)
-            return
-        except asyncio.TimeoutError:
-            pass
-
 
 def _find_last_round_ticker(series: str, data_dir: str = "data/rounds") -> str:
     """Check existing CSV for the last completed round to avoid duplicates on restart."""
@@ -345,18 +314,11 @@ async def collect(series: str, hours: float) -> None:
             kalshi_ws.set_tickers([ctx.ticker])
             kalshi_task = asyncio.create_task(kalshi_ws.start())
 
-            # Start REST poller as backup for Kalshi data
-            kalshi_state: dict = {}
-            rest_stop = asyncio.Event()
-            rest_task = asyncio.create_task(
-                _poll_kalshi_rest(client, ctx.ticker, kalshi_state, rest_stop)
-            )
-
             latest_spot: Decimal | None = None
             latest_kraken: Decimal | None = None
             last_snapshot = 0.0
 
-            # Track best Kalshi data from both WS and REST
+            # Track best Kalshi data from WS
             best_yes_bid: Decimal | None = None
             best_yes_ask: Decimal | None = None
             best_no_bid: Decimal | None = None
@@ -398,19 +360,6 @@ async def collect(series: str, hours: float) -> None:
                         except asyncio.QueueEmpty:
                             break
 
-                    # Merge REST poll data (fills gaps when WS is quiet)
-                    if "yes_bid" in kalshi_state:
-                        if kalshi_state.get("yes_bid") is not None:
-                            best_yes_bid = kalshi_state["yes_bid"]
-                        if kalshi_state.get("yes_ask") is not None:
-                            best_yes_ask = kalshi_state["yes_ask"]
-                        if kalshi_state.get("no_bid") is not None:
-                            best_no_bid = kalshi_state["no_bid"]
-                        if kalshi_state.get("no_ask") is not None:
-                            best_no_ask = kalshi_state["no_ask"]
-                        if kalshi_state.get("volume") is not None:
-                            best_volume = kalshi_state["volume"]
-
                     # Write snapshot at interval
                     now = time.monotonic()
                     if now - last_snapshot >= SNAPSHOT_INTERVAL:
@@ -432,9 +381,20 @@ async def collect(series: str, hours: float) -> None:
                     await asyncio.sleep(0.1)
 
             finally:
-                # Round end
+                # Round end — fetch official result from Kalshi API
                 outcome = "unknown"
-                if latest_spot is not None:
+                for _ in range(6):  # retry up to 30s for finalization
+                    try:
+                        mkt = await client.fetch_market(ctx.ticker)
+                        if mkt and mkt.get("result") in ("yes", "no"):
+                            outcome = mkt["result"]
+                            break
+                    except Exception as e:
+                        logger.debug("Result fetch error: %s", e)
+                    await asyncio.sleep(5)
+
+                # Fallback to spot-based inference if API didn't return result
+                if outcome == "unknown" and latest_spot is not None:
                     outcome = (
                         "yes" if latest_spot >= ctx.floor_strike else "no"
                     )
@@ -449,17 +409,11 @@ async def collect(series: str, hours: float) -> None:
                     kraken_spot=latest_kraken,
                 )
 
-                # Stop Kalshi WS + REST poller
-                rest_stop.set()
+                # Stop Kalshi WS
                 await kalshi_ws.stop()
                 kalshi_task.cancel()
-                rest_task.cancel()
                 try:
                     await kalshi_task
-                except asyncio.CancelledError:
-                    pass
-                try:
-                    await rest_task
                 except asyncio.CancelledError:
                     pass
 

@@ -365,3 +365,14 @@ class CircuitBreaker:
         """Clear the skip-round flag after skipping one round."""
         self._skip_next_round = False
         self._save_state()
+
+    def reset_ath(self, current_balance: Decimal) -> None:
+        """Reset ATH to current balance. Use after deposits or manual reset."""
+        self._all_time_high = current_balance
+        self._stopped_for_day = False
+        self._consecutive_losses = 0
+        self._skip_next_round = False
+        self._save_state()
+        logger.info(
+            "Circuit breaker: ATH reset to $%s", current_balance,
+        )

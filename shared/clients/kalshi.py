@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import logging
 import time
-from collections.abc import AsyncIterator
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
@@ -81,27 +80,17 @@ class KalshiClient:
         resp.raise_for_status()
         return resp
 
-    # ---- Series ----
+    # ---- Markets ----
 
-    async def fetch_all_series(self) -> list[dict]:
-        """Fetch all series (for category/fee cache)."""
-        all_series: list[dict] = []
-        cursor: str | None = None
-        while True:
-            params: dict = {"limit": 1000}
-            if cursor:
-                params["cursor"] = cursor
-            resp = await self._get("/series", params=params)
-            data = resp.json()
-            batch = data.get("series", [])
-            all_series.extend(batch)
-            cursor = data.get("cursor", "")
-            if not cursor or not batch:
-                break
-        logger.info("Kalshi: fetched %d series", len(all_series))
-        return all_series
-
-    # ---- Events ----
+    async def fetch_market(self, ticker: str) -> dict | None:
+        """Fetch a single market by ticker. Returns None on 404."""
+        try:
+            resp = await self._get(f"/markets/{ticker}")
+            return resp.json().get("market")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
+            raise
 
     async def fetch_events(
         self,
@@ -119,112 +108,6 @@ class KalshiClient:
         resp = await self._get("/events", params=params)
         data = resp.json()
         return data.get("events", []), data.get("cursor", "")
-
-    async def fetch_all_events(
-        self, status: str = "open", with_nested_markets: bool = False
-    ) -> list[dict]:
-        """Paginate through all events."""
-        all_events: list[dict] = []
-        cursor: str | None = None
-        while True:
-            batch, cursor = await self.fetch_events(
-                status=status, cursor=cursor, with_nested_markets=with_nested_markets
-            )
-            all_events.extend(batch)
-            if not cursor or not batch:
-                break
-        logger.info(
-            "Kalshi: fetched %d events (nested_markets=%s)",
-            len(all_events), with_nested_markets,
-        )
-        return all_events
-
-    async def iter_event_pages(
-        self, status: str = "open", with_nested_markets: bool = False
-    ) -> AsyncIterator[list[dict]]:
-        """Yield pages of events without accumulating all in memory."""
-        cursor: str | None = None
-        total = 0
-        while True:
-            batch, cursor = await self.fetch_events(
-                status=status, cursor=cursor, with_nested_markets=with_nested_markets
-            )
-            if not batch:
-                break
-            total += len(batch)
-            yield batch
-            if not cursor:
-                break
-        logger.info("Kalshi: streamed %d events (nested_markets=%s)", total, with_nested_markets)
-
-    # ---- Single-item fetches ----
-
-    async def fetch_market(self, ticker: str) -> dict | None:
-        """Fetch a single market by ticker. Returns None on 404."""
-        try:
-            resp = await self._get(f"/markets/{ticker}")
-            return resp.json().get("market")
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return None
-            raise
-
-    async def fetch_event(self, event_ticker: str) -> dict | None:
-        """Fetch a single event by ticker. Returns None on 404."""
-        try:
-            resp = await self._get(f"/events/{event_ticker}")
-            return resp.json().get("event")
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return None
-            raise
-
-    # ---- Trades ----
-
-    async def fetch_trades(
-        self,
-        min_ts: str | None = None,
-        max_ts: str | None = None,
-        limit: int = 1000,
-        cursor: str | None = None,
-    ) -> tuple[list[dict], str]:
-        """Fetch a page of trades. Returns (trades, next_cursor)."""
-        params: dict = {"limit": limit}
-        if min_ts:
-            params["min_ts"] = min_ts
-        if max_ts:
-            params["max_ts"] = max_ts
-        if cursor:
-            params["cursor"] = cursor
-        resp = await self._get("/markets/trades", params=params)
-        data = resp.json()
-        return data.get("trades", []), data.get("cursor", "")
-
-    async def fetch_trades_paginated(
-        self,
-        min_ts: str | None = None,
-        max_ts: str | None = None,
-        max_pages: int = 500,
-    ) -> list[dict]:
-        """Paginate through trades in a time window."""
-        all_trades: list[dict] = []
-        cursor: str | None = None
-        pages = 0
-        while pages < max_pages:
-            batch, cursor = await self.fetch_trades(
-                min_ts=min_ts, max_ts=max_ts, cursor=cursor
-            )
-            all_trades.extend(batch)
-            pages += 1
-            if not cursor or not batch:
-                break
-        if pages >= max_pages:
-            logger.warning("Kalshi: hit max_pages (%d) fetching trades", max_pages)
-        logger.info(
-            "Kalshi: fetched %d trades in %d pages (min_ts=%s, max_ts=%s)",
-            len(all_trades), pages, min_ts, max_ts,
-        )
-        return all_trades
 
     # ---- Portfolio (for execution engine) ----
 
