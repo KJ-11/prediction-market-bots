@@ -1,6 +1,7 @@
 services:
   bot:
     build: .
+    image: prediction-market-bots
     command: python -m bots.kalshi_crypto.main --series all
     restart: always
     env_file: .env
@@ -9,8 +10,9 @@ services:
     volumes:
       - ./data:/app/data
 
+  # Kalshi collectors
   collector-btc:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_rounds.py --series KXBTC15M --hours 8760
     restart: always
     env_file: .env
@@ -18,7 +20,7 @@ services:
       - ./data:/app/data
 
   collector-eth:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_rounds.py --series KXETH15M --hours 8760
     restart: always
     env_file: .env
@@ -26,7 +28,7 @@ services:
       - ./data:/app/data
 
   collector-sol:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_rounds.py --series KXSOL15M --hours 8760
     restart: always
     env_file: .env
@@ -34,121 +36,121 @@ services:
       - ./data:/app/data
 
   collector-xrp:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_rounds.py --series KXXRP15M --hours 8760
     restart: always
     env_file: .env
     volumes:
       - ./data:/app/data
 
-  # Polymarket collectors — 5m and 15m crypto up/down markets
+  # Polymarket collectors — 4 coins x 4 durations
   poly-5m-btc:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin btc --duration 5m --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-5m-eth:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin eth --duration 5m --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-5m-sol:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin sol --duration 5m --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-5m-xrp:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin xrp --duration 5m --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-15m-btc:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin btc --duration 15m --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-15m-eth:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin eth --duration 15m --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-15m-sol:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin sol --duration 15m --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-15m-xrp:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin xrp --duration 15m --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-1h-btc:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin btc --duration 1h --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-1h-eth:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin eth --duration 1h --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-1h-sol:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin sol --duration 1h --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-1h-xrp:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin xrp --duration 1h --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-4h-btc:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin btc --duration 4h --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-4h-eth:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin eth --duration 4h --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-4h-sol:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin sol --duration 4h --hours 8760
     restart: always
     volumes:
       - ./data:/app/data
 
   poly-4h-xrp:
-    build: .
+    image: prediction-market-bots
     command: python scripts/collect_polymarket.py --coin xrp --duration 4h --hours 8760
     restart: always
     volumes:
