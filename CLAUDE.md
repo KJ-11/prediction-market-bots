@@ -61,7 +61,7 @@ Kalshi short-duration crypto binary markets (live trading). Polymarket data coll
 - When deploying a new bot version: update lifecycle.json with new version entry, tag git (`git tag -a bot-vN -m "description"`)
 
 ## Deployment & Operations
-- GCP VM: `<GCP_ZONE>`, `35.245.140.169`
+- GCP VM: `<GCP_ZONE>`, `<VM_IP>`, e2-small (2GB RAM)
 - GCP project: `<GCP_PROJECT>` (named "Bots"), account: `kshjhun@gmail.com`
   - NOT `profitlabs` — that is a different project with a different account (`<CONTACT_EMAIL>`)
 - 21 Docker services: bot + 4 Kalshi collectors + 16 PM collectors (4 coins x 4 durations)

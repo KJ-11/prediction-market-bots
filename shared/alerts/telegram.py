@@ -34,5 +34,5 @@ async def send_telegram(
             logger.debug("Telegram: sent message to %s", chat_id)
             return True
     except Exception as e:
-        logger.error("Telegram: failed to send: %s", e)
+        logger.error("Telegram: failed to send (%s): %s", type(e).__name__, e)
         return False

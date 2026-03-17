@@ -188,8 +188,8 @@ def compute_metrics(settlements: list[dict]) -> dict:
 
     for s in settlements:
         # Skip zero-position settlements (market existed but we had no position)
-        yes_count = int(s.get("yes_count", 0))
-        no_count = int(s.get("no_count", 0))
+        yes_count = int(float(s.get("yes_count_fp", "0")))
+        no_count = int(float(s.get("no_count_fp", "0")))
         if yes_count == 0 and no_count == 0:
             continue
 
@@ -411,7 +411,7 @@ def print_report(
 def sync_data() -> None:
     """Rsync alert logs, trade logs, and round snapshots from VM."""
     print("Syncing data from VM...")
-    remote = "kj@35.245.140.169:~/prediction-market-bots/data"
+    remote = "kj@<VM_IP>:~/prediction-market-bots/data"
     ssh_opts = ["-e", "ssh -i ~/.ssh/google_compute_engine"]
     syncs = [
         (f"{remote}/alerts/", str(ALERTS_DIR) + "/"),

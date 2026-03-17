@@ -5,14 +5,17 @@ Two APIs:
 - CLOB API (clob.polymarket.com): Order books, prices, spreads
 
 Crypto short-duration markets use predictable slugs:
-    {coin}-updown-{duration}-{unix_close_timestamp}
-    e.g. btc-updown-5m-1773150900
+    5m/15m/4h: {coin}-updown-{duration}-{unix_close_timestamp}
+               e.g. btc-updown-5m-1773150900
+    1h:        {fullname}-up-or-down-{month}-{day}-{year}-{hour}{am/pm}-et
+               e.g. bitcoin-up-or-down-march-17-2026-12pm-et
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone, timedelta
 
 import httpx
 
@@ -190,6 +193,13 @@ class PolymarketClient:
         "1h": 3600,
         "4h": 14400,
     }
+    # 1h slugs use full coin names
+    _COIN_FULLNAMES = {
+        "btc": "bitcoin",
+        "eth": "ethereum",
+        "sol": "solana",
+        "xrp": "xrp",
+    }
 
     async def discover_crypto_round(
         self,
@@ -199,7 +209,9 @@ class PolymarketClient:
     ) -> dict | None:
         """Discover a crypto up/down market by constructing its slug.
 
-        Slug format: {coin}-updown-{duration}-{unix_close_timestamp}
+        Slug formats:
+            5m/15m/4h: {coin}-updown-{duration}-{unix_close_timestamp}
+            1h:        {fullname}-up-or-down-{month}-{day}-{year}-{hour}{am/pm}-et
 
         Args:
             coin: btc, eth, sol, xrp
@@ -213,9 +225,12 @@ class PolymarketClient:
             logger.error("Unknown duration: %s", duration)
             return None
 
-        now = int(time.time())
-        window_end = ((now // interval) + 1 + offset_windows) * interval
-        slug = f"{coin.lower()}-updown-{duration}-{window_end}"
+        if duration == "1h":
+            slug = self._build_1h_slug(coin, offset_windows)
+        else:
+            now = int(time.time())
+            window_end = ((now // interval) + 1 + offset_windows) * interval
+            slug = f"{coin.lower()}-updown-{duration}-{window_end}"
 
         try:
             return await self.get_event_by_slug(slug)
@@ -223,6 +238,24 @@ class PolymarketClient:
             if e.response.status_code == 404:
                 return None
             raise
+
+    def _build_1h_slug(self, coin: str, offset_windows: int = 0) -> str:
+        """Build the human-readable slug for 1h crypto markets.
+
+        Format: {fullname}-up-or-down-{month}-{day}-{year}-{hour}{am/pm}-et
+        The hour in the slug is the *start* of the window in Eastern Time.
+        """
+        ET = timezone(timedelta(hours=-4))  # EDT (summer), adjust if needed
+        now_et = datetime.now(ET)
+        # Round down to current hour boundary, then apply offset
+        window_start = now_et.replace(minute=0, second=0, microsecond=0) + timedelta(hours=offset_windows)
+        fullname = self._COIN_FULLNAMES.get(coin.lower(), coin.lower())
+        month = window_start.strftime("%B").lower()
+        day = window_start.day
+        year = window_start.year
+        hour_12 = window_start.strftime("%I").lstrip("0")
+        ampm = window_start.strftime("%p").lower()
+        return f"{fullname}-up-or-down-{month}-{day}-{year}-{hour_12}{ampm}-et"
 
     async def discover_all_crypto_rounds(
         self,

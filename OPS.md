@@ -8,7 +8,7 @@ Quick reference for the Kalshi trading bot and data collectors running on GCP.
 gcloud compute ssh <VM_NAME> --zone=<GCP_ZONE> --project=<GCP_PROJECT>
 
 # Or direct SSH
-ssh -i ~/.ssh/google_compute_engine kj@35.245.140.169
+ssh -i ~/.ssh/google_compute_engine kj@<VM_IP>
 ```
 
 ## Service Status
@@ -84,7 +84,7 @@ Files: `data/trades/kalshi-crypto-multi-YYYY-MM-DD.csv` (created when first trad
 ### Pull data to laptop
 ```bash
 rsync -avz -e "ssh -i ~/.ssh/google_compute_engine" \
-  kj@35.245.140.169:~/prediction-market-bots/data/ \
+  kj@<VM_IP>:~/prediction-market-bots/data/ \
   /Users/kj/Code/Personal/prediction-market-bots/data/
 ```
 
@@ -165,7 +165,7 @@ rsync -avz --exclude='.env' --exclude='venv/' --exclude='data/' \
   --exclude='__pycache__/' --exclude='.git/' --exclude='*.pyc' \
   -e "ssh -i ~/.ssh/google_compute_engine" \
   /Users/kj/Code/Personal/prediction-market-bots/ \
-  kj@35.245.140.169:~/prediction-market-bots/
+  kj@<VM_IP>:~/prediction-market-bots/
 
 gcloud compute ssh <VM_NAME> --zone=<GCP_ZONE> --project=<GCP_PROJECT> -- \
   'cd ~/prediction-market-bots && docker compose up -d --build'
