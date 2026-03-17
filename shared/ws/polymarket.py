@@ -270,11 +270,12 @@ class PolymarketMarketWSFeed:
 
     def _handle_best_bid_ask(self, event: dict) -> None:
         """Top-of-book update (requires custom_feature_enabled)."""
+        asset_id = event.get("asset_id", "") or event.get("token_id", "")
         condition_id = event.get("market", "")
         timestamp = event.get("timestamp", 0)
 
         update = PolymarketBookUpdate(
-            asset_id="",  # not provided in best_bid_ask events
+            asset_id=asset_id,
             condition_id=condition_id,
             best_bid=dec(event.get("best_bid")),
             best_ask=dec(event.get("best_ask")),

@@ -430,30 +430,31 @@ async def collect(coin: str, duration: str, hours: float) -> None:
                     while True:
                         try:
                             bu = book_queue.get_nowait()
-                            if bu.asset_id == up_token_id or not bu.asset_id:
+                            if bu.asset_id == up_token_id:
                                 if bu.best_bid is not None:
                                     best_up_bid = bu.best_bid
                                 if bu.best_ask is not None:
                                     best_up_ask = bu.best_ask
-                            if bu.asset_id == down_token_id:
+                            elif bu.asset_id == down_token_id:
                                 if bu.best_bid is not None:
                                     best_down_bid = bu.best_bid
                                 if bu.best_ask is not None:
                                     best_down_ask = bu.best_ask
-                            # Derive from complement
-                            if best_down_bid is None and best_up_ask is not None:
-                                best_down_bid = Decimal("1") - best_up_ask
-                            if best_down_ask is None and best_up_bid is not None:
-                                best_down_ask = Decimal("1") - best_up_bid
+                            # Skip unattributed events (no asset_id)
+                            # — these can't be reliably assigned to a token
                         except asyncio.QueueEmpty:
                             break
 
-                    # Drain trade queue
+                    # Drain trade queue — track both UP and DOWN tokens
                     while True:
                         try:
                             tu = trade_queue.get_nowait()
                             if tu.asset_id == up_token_id:
                                 last_trade_price = tu.price
+                                last_trade_side = tu.side
+                            elif tu.asset_id == down_token_id:
+                                # Infer UP implied price from DOWN trade
+                                last_trade_price = Decimal("1") - tu.price
                                 last_trade_side = tu.side
                         except asyncio.QueueEmpty:
                             break
@@ -500,6 +501,7 @@ async def collect(coin: str, duration: str, hours: float) -> None:
                         break
 
                 # Fallback to price-based inference
+                # last_trade_price is now UP-implied (from both UP and DOWN trades)
                 if outcome == "unknown":
                     if last_trade_price is not None and last_trade_price >= Decimal("0.90"):
                         outcome = "up"
@@ -509,6 +511,10 @@ async def collect(coin: str, duration: str, hours: float) -> None:
                         outcome = "up"
                     elif best_up_ask is not None and best_up_ask <= Decimal("0.10"):
                         outcome = "down"
+                    elif best_down_bid is not None and best_down_bid >= Decimal("0.90"):
+                        outcome = "down"
+                    elif best_down_ask is not None and best_down_ask <= Decimal("0.10"):
+                        outcome = "up"
 
                 collector.write_round_end(
                     slug=slug,

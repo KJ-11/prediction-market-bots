@@ -86,3 +86,105 @@ Shifted to T+300-540 window with 0.2% distance threshold. Prices are ~$0.70-0.85
 | ETH  | $0.031 | $0.022 | $0.022 | $0.020 |
 | SOL  | $0.036 | $0.023 | $0.024 | $0.019 |
 | XRP  | $0.045 | $0.024 | $0.025 | $0.024 |
+
+---
+
+## V3 Analysis Findings (Mar 17, 2026 — 2,529 rounds over 9 days)
+
+*Full analysis: `research/v3-data-analysis.md`. Scripts: `scripts/v3_analysis.py`, `scripts/v3_analysis_deep.py`.*
+
+## 13. Across-the-Board EV at the Ask is Negative or Marginal
+
+Tested 170 strategy parameter combinations (7 time windows × 5 distance thresholds × ~5 coin sets). **153 of 170 (90%) are negative EV when buying at the ask price.** The market is well-calibrated: accuracy increases with distance and time, but contract prices increase in lock-step.
+
+Key examples (all coins, buying at ask):
+- T+250-500, dist>0.15%: 83.5% acc, med $0.84, EV=$-0.016
+- T+250-500, dist>0.20%: 86.4% acc, med $0.87, EV=$-0.016
+- T+450-600, dist>0.15%: 91.4% acc, med $0.92, EV=$-0.016
+- T+600-800, dist>0.30%: 97.7% acc, med $0.99, EV=$-0.023
+
+The EV is remarkably consistent at about **-$0.02/trade** regardless of the window or threshold — the market always prices in the signal just enough.
+
+## 14. ETH is the Only Coin with Positive EV at the Ask
+
+ETH consistently outperforms other coins by 3-8% accuracy at equivalent distance thresholds:
+- ETH T+200-450 d>0.10%: 80.4% acc, ask $0.77, **EV=$+0.014**
+- ETH T+200-450 d>0.25%: 88.6% acc, ask $0.86, **EV=$+0.016**
+- ETH T+250-500 d>0.20%: 88.2% acc, ask $0.86, **EV=$+0.012**
+
+BTC at equivalent params: T+250-500 d>0.15%: 80.1% acc, ask $0.81, EV=$-0.059. ETH's advantage is real but the mechanism is unclear — possibly ETH market is less efficient due to lower volume (32K vs 313K contracts/round).
+
+**None of these pass a 95% significance test** (best: ETH T+250-500 d>0.20%, 95% CI 81.9%-92.5%, BE=87%).
+
+## 15. Entry Price Matters More Than Signal Quality
+
+The difference between ask and bid entry transforms many strategies from negative to positive EV:
+- ETH T+200-450 d>0.10%: ask EV=$+0.014, **bid EV=$+0.044**
+- ETH T+250-500 d>0.20%: ask EV=$+0.012, **bid EV=$+0.032**
+- BTC T+350-600 d>0.15%: ask EV=$-0.007, **bid EV=$+0.008**
+
+The spread is $0.01 for BTC and $0.03 for ETH/SOL/XRP. Moving from ask to bid saves $0.01-$0.03 per contract — often the difference between profitable and not.
+
+## 16. Market Calibration Sweet Spot at $0.60-$0.80
+
+Updated calibration analysis (T+250-500, 2,487 rounds):
+| Implied Prob | Actual WR | Miscalibration | n |
+|:--|:--|:--|:--|
+| 6.6% | 3.2% | -3.4% | 62 |
+| 15.6% | 17.3% | +1.7% | 197 |
+| 25.1% | 24.5% | -0.6% | 282 |
+| 35.1% | 31.6% | -3.5% | 345 |
+| 45.2% | 44.3% | -1.0% | 357 |
+| 55.2% | 54.7% | -0.5% | 369 |
+| 65.0% | 66.9% | +1.9% | 329 |
+| **74.9%** | **80.5%** | **+5.6%** | **272** |
+| 84.9% | 87.4% | +2.4% | 190 |
+| 93.6% | 95.2% | +1.6% | 84 |
+
+The $0.70-$0.80 range is the biggest exploitable miscalibration. Contracts are systematically underpriced by ~5.6%.
+
+## 17. Other Signals Add No Independent Information
+
+- **Momentum**: 60.6% overall accuracy, scales with magnitude, but collinear with distance
+- **Book imbalance**: 70.7% accuracy, scales with confidence, but IS the market price signal
+- **Book + distance combined**: Marginally worse than distance alone (filters out correct signals where book is slow)
+- **Volume**: No meaningful accuracy difference across volume quartiles
+- **Sequential rounds**: 47% repeat previous outcome (slight mean-reversion, not exploitable)
+- **Cross-coin correlation**: 58-75% (BTC-ETH highest), confirms shared market moves, not independently useful
+
+## 18. Volatility Regime Matters but is Hard to Exploit
+
+Low-vol rounds: 92.4% signal accuracy (at d>0.15%), but entry prices are lower (med $0.81)
+High-vol rounds: 76.4% accuracy, but entry prices are higher (med $0.89)
+
+The market partially prices in volatility — but not perfectly. Low-vol + ETH + d>0.15% showed 89.5% accuracy (n=19, too small). Needs more data.
+
+## 19. Time-of-Day Effects Exist but Are Noisy
+
+Signal accuracy varies from 61% (15:00 UTC) to 97% (18:00 UTC) at T+250-500 d>0.15%. Sample sizes per hour are 18-65 — too small to be actionable. The yes_rate also varies by hour (42% at 02:00 to 64% at 13:00), but this likely reflects crypto market session dynamics rather than anything exploitable.
+
+## 20. Polymarket Data Has Multiple Collector Bugs (VERIFIED 2026-03-17)
+
+**Root cause identified**: Not a token mapping issue (clobTokenIds[0] = "Up" is correct). Three distinct bugs:
+
+1. **`best_bid_ask` misattribution**: WS `best_bid_ask` events have no `asset_id` field → collector routes ALL to UP token bucket → `up_bid`/`up_ask` randomly contain DOWN token values. 88.3% of "real" book episodes last ≤3 snapshots (DOWN token flicker).
+2. **UP-only trade tracking**: `last_trade_price` only records UP token trades. DOWN token trades silently dropped → stale prices, 7.5% unknown outcomes (15m), 11% (5m).
+3. **`up_midpoint` useless**: 51.6% of snapshots = 0.50 (from 0.01/0.99 book). Even non-0.50 values contaminated by Bug 1.
+
+**What IS reliable**: `last_trade_price` (consistent UP token view), spot prices (all 3 sources), outcomes for resolved rounds (92.5% of 15m).
+
+**Impact on prior PM analysis**: Any finding using `up_bid`, `up_ask`, `up_midpoint`, or `spread` is invalidated. PM miscalibration finding (5-10% in 0.30-0.80 range) used `last_trade_price` which is reliable, but has selection bias from 7.5% unknown outcomes.
+
+Key stats:
+- PM 15m: 1,713 rounds, 7.5% unknown outcomes, 50.1% up rate
+- PM 5m: 4,596 rounds, 11.0% unknown outcomes, 47.3% up rate
+- Cross-platform BTC 15m: **96.2% agreement** (340 matched rounds), 3.8% disagree (CF Benchmarks vs Chainlink resolution)
+
+See `research/data-verification.md` for full verification report.
+
+## 21. bot-v2 Live Trading Assessment
+
+bot-v2 (T+250-500, dist>0.15%, BTC/ETH/XRP, Kelly 0.30) is running since Mar 10:
+- The all-coin aggregate EV is estimated at **$-0.016/trade** based on 822 backtest signals
+- ETH-only would be positive ($+0.005), but BTC ($-0.059) and XRP drag it negative
+- Recommendation: **stop live trading or switch to ETH-only**
