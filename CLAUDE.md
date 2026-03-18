@@ -1,12 +1,12 @@
 # Prediction Market Trading Bots
 
 ## Current Focus
-Kalshi short-duration crypto binary markets (live trading). Polymarket data collection (16 collectors across 4 coins x 4 durations). Cross-platform arb and PM trading strategies are deferred until we have sufficient PM data.
+Exploring and building prediction market trading strategies across multiple verticals. Current infrastructure covers Kalshi crypto markets and Polymarket data collection. Expanding to new market types (e.g., sports via ESPN + Kalshi). Strategy is being reworked from the ground up — no assumed edge.
 
 ## Project Structure
 - `shared/` — Shared infrastructure (clients, execution, risk, alerts, ws, utils)
 - `bots/kalshi_crypto/` — Crypto bot: discovery, strategy, sizing, main loop
-- `scripts/` — Data collection (collect_rounds.py for Kalshi, collect_polymarket.py for PM), backtesting, analysis
+- `scripts/` — Data collection (collect_rounds.py for Kalshi, collect_polymarket.py for PM), backtesting, analysis. `scripts/archive/` has historical one-off analysis scripts.
 - `tests/` — Test suite
 - `data/trades/` — CSV trade logs (one per day)
 - `data/rounds/` — Collected round snapshots for analysis
@@ -29,6 +29,14 @@ Kalshi short-duration crypto binary markets (live trading). Polymarket data coll
 - `data/alerts/YYYY-MM-DD.log` — human-readable alert timeline
 - `data/circuit_breaker.json` — persisted circuit breaker state (ATH, consecutive losses, stopped_for_day)
 - `data/lifecycle.json` — bot version lifecycle metadata
+
+## PM Data Quality (IMPORTANT)
+PM collector had bugs fixed on 2026-03-17. Data before this date has known issues:
+- **Kalshi data**: Fully reliable, no issues.
+- **PM data before 2026-03-17**: `up_bid`, `up_ask`, `up_midpoint`, `spread`, `down_bid`, `down_ask` are UNRELIABLE (best_bid_ask events were misattributed between tokens). `outcome` is "unknown" for 7-11% of rounds (only tracked UP token trades). **DO NOT use these columns from old PM data in analysis.**
+- **PM data from 2026-03-17+**: Fixed. Book attribution is per-token, DOWN trades are tracked (inferred as 1-down_price), outcome determination uses both tokens.
+- **Always usable** (old and new): `last_trade_price` (consistent UP-token view), `spot_price`, `kraken_price`, `rtds_price`, `volume`, timing fields, resolved outcomes.
+- See `research/data-verification.md` for the full verification report.
 
 ## Conventions
 - Python 3.9+, async-first (httpx, websockets)
@@ -91,17 +99,14 @@ The `research/` directory is our knowledge base:
 - `research/empirical-findings.md` — Our own data analysis results
 - `research/strategy-evaluation.md` — What we've tested: ruled out, validated, deferred
 - `research/open-questions.md` — TODOs and things to investigate
+- `research/v3-analysis-summary.md` — Consolidated V3 analysis (Mar 17, 2,529 rounds)
 
 ## Strategy Principles
-- Spot distance from strike is the signal — not direction, not momentum, not contract divergence
-- T+250-500 is the window (v2) — earlier entry captures cheaper prices with comparable accuracy
-- 0.15% distance threshold (v2) — lower WR but cheaper avg price = higher EV/contract
-- SOL dropped (v2) — worst coin by WR (79%), BTC/ETH/XRP only
-- Kelly 30% (v2) — captures more of validated edge
-- EV per contract matters more than WR alone — $0.065 EV at 83% WR beats $0.049 EV at 87% WR
-- Market reprices faster than expected — median 14-21s lag, not minutes
-- Cross-coin consensus doesn't work — 57-67% accuracy, negative EV after fees
-- ETH is the best coin — most consistent edge across all windows and thresholds
-- Fees are manageable at extremes — $0.003-0.006 at $0.90+
+- No assumed edge — every strategy must be validated from data before going live
+- EV per contract matters more than WR alone
+- Paper trade every strategy before going live
 - WebSocket over REST — by the time REST round-trips, opportunity is gone
 - Simple mechanical rules over complex models
+
+## TODO
+- Remind me to rotate Kalshi and Telegram API keys since you used cat .env and exposed them. 
