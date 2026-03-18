@@ -1,42 +1,5 @@
 # Strategy Evaluation
 
-## Ruled Out (Validated with 109+ rounds)
-1. **Yes/No Arbitrage** — single order book, impossible
-2. **Spread Farming** — negative EV after fees
-3. **Late-Round Snipe T-60s** — contract already at $0.99+, negative P&L
-4. **Late-Round Snipe T-120s** — 87-89% win rate but avg P&L is -$0.01 to -$0.03. Contract already priced correctly.
-5. **Early Momentum T+0 to T+180s** — 55-65% accuracy, noise. Mean reversion dominates.
-6. **Cross-Coin Consensus** — Dissenting coin follows consensus only 57-67%. Not enough after fees. **Strategy abandoned.**
-7. **XRP Spot-Based Trading** — Coinbase spot has ZERO predictive power for XRP (46-53% accuracy). CF Benchmarks source differs.
-8. **Contract-Confirms-Spot at Mid-Range** — 60-70% win, negative P&L. Fees at $0.50-0.70 entry eat the edge.
-
-## Historical (Invalidated by V3 Analysis)
-
-*Mar 17 V3 analysis (2,529 rounds) found these strategies are negative EV at the ask. The market is well-calibrated: accuracy scales with distance, but so do prices. See `research/v3-analysis-summary.md`.*
-
-9. **Late-Mid-Round Spot Distance (T+600-800, dist>0.2%)** — original strategy (pre-v1)
-   - BTC: 48 trades, 100% win, +$2.82
-   - ETH: 57 trades, 98.2% win, +$2.81
-   - SOL: 55 trades, 98.2% win, +$3.37
-   - ~$0.05/trade avg, ~21 trades/day, ~$9/day
-   - **V3: negative EV at ask, market already priced correctly at T>600**
-10. **ETH Mid-Round (T+300-600, dist>0.2%)** — secondary signal (pre-v1)
-    - 49 trades, 91.8% win, +$0.086/trade, +$4.19 total
-    - **V3: marginally positive for ETH only, not significant**
-11. **bot-v1: T+300-540, dist>0.2%, Kelly 0.25, BTC/ETH/SOL/XRP** — first live version
-    - 56 live trades, 82% WR, -$3.91 P&L (thin edge eaten by losses on SOL)
-    - Backtest (644 rounds): 84.1% WR, EV/contract +$0.049, BE WR 81.6%
-    - SOL dragged results: 79.2% WR vs 88%+ for BTC/ETH
-    - **V3: negative EV across all coins at the ask**
-12. **bot-v2: T+250-500, dist>0.15%, Kelly 0.30, BTC/ETH/XRP** — Mar 10
-    - Backtest (644 rounds, tick-accurate): 83.3% WR, EV/contract +$0.065, BE WR 76.8%
-    - Higher EV despite lower WR — cheaper avg price ($0.76 vs $0.80) fattens profit margin
-    - 95% CI lower bound (79.2%) is 2.4% above break-even (vs 1.3% for v1)
-    - More trades per day = faster compounding
-    - Changes: drop SOL, widen window earlier, lower threshold, bump Kelly 25→30%
-    - Higher avg PnL per trade but lower win rate
-    - **V3: estimated EV=$-0.016/trade across all coins, negative EV**
-
 ## V3 Analysis Update (Mar 17, 2026 — 2,529 rounds)
 
 13. **bot-v2 (all coins): NEGATIVE EV — stop or modify** (2026-03-17)
@@ -72,7 +35,7 @@
 4. **Interactive Telegram Bot** — Two-way Telegram bot for status/control (/status, /balance, /stop, /trades)
 5. **Order book depth strategy** — Use `yes_bid_size_fp`/`yes_ask_size_fp` from WS and `GET /markets/{ticker}/orderbook` to detect large resting orders, whale positioning, or liquidity vacuums as trading signals
 6. **Multi-level order filling** — Walk the book across price levels instead of capping to top-of-book. Not needed until balance exceeds ~$5k.
-7. **Polymarket trading** — see `research/polymarket-roadmap.md` for analysis plan and strategy ideas
+7. **Polymarket trading** — different resolution source (Chainlink/Binance), systematic miscalibration in 0.30-0.80 range
 8. **Limit order execution** — Shift from IOC at ask to resting limit orders at bid/mid. Could 2-3x EV per trade. Requires understanding fill rates, queue priority, and cancellation logic on Kalshi.
 9. **Calibration-based strategy** — Trade the $0.60-$0.80 miscalibration directly, independent of spot distance signal. Market underprices contracts in this range by 3-6%.
 

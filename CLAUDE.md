@@ -1,42 +1,34 @@
 # Prediction Market Trading Bots
 
 ## Current Focus
-Exploring and building prediction market trading strategies across multiple verticals. Current infrastructure covers Kalshi crypto markets and Polymarket data collection. Expanding to new market types (e.g., sports via ESPN + Kalshi). Strategy is being reworked from the ground up — no assumed edge.
+Exploring and building prediction market trading strategies across multiple verticals. Current infrastructure covers Kalshi crypto markets and Polymarket data collection. Strategy is being reworked from the ground up — no assumed edge.
 
 ## Project Structure
-- `shared/` — Shared infrastructure (clients, execution, risk, alerts, ws, utils)
-- `bots/kalshi_crypto/` — Crypto bot: discovery, strategy, sizing, main loop
-- `scripts/` — Data collection (collect_rounds.py for Kalshi, collect_polymarket.py for PM), backtesting, analysis. `scripts/archive/` has historical one-off analysis scripts.
+- `shared/` — Reusable infrastructure (clients, execution, risk, alerts, ws, utils)
+- `bots/kalshi_crypto/` — Reference bot implementation (template for new bots)
+- `scripts/` — Data collectors (`collect_rounds.py`, `collect_polymarket.py`), performance reporting, smoke tests
 - `tests/` — Test suite
-- `data/trades/` — CSV trade logs (one per day)
-- `data/rounds/` — Collected round snapshots for analysis
-- `data/alerts/` — Daily alert logs (synced from VM via rsync)
-- `data/lifecycle.json` — Bot version lifecycle metadata (deposits, start times, balances)
-- `research/` — Knowledge base: sources index, extracted insights, deep dives
+- `data/` — Trade logs, round snapshots, alert logs, circuit breaker state, lifecycle metadata
+- `research/` — Market mechanics (`kalshi-mechanics.md`, `polymarket-mechanics.md`) and strategy evaluation
+
+## Building a New Bot
+Use `bots/kalshi_crypto/` as the template. The pattern:
+1. **`discovery.py`** — Find active markets for this round
+2. **`strategy.py`** — Define `RoundContext`, `TradeSignal`, `BaseStrategy` ABC
+3. **`strategies/`** — Concrete strategy implementations (e.g., `spot_distance.py`)
+4. **`sizing.py`** — Position sizing (Kelly criterion with fee model)
+5. **`main.py`** — Entry point: setup engines/risk/strategies, main discovery loop
+6. **`round.py`** — Round execution: subscribe to markets, run strategies, execute signals, settle
+
+`shared/` provides: API clients, execution engines (live + paper), risk management (kill switch, circuit breaker, risk limits), WebSocket feeds, alerting (Telegram + file), trade logging, bot lifecycle runner.
 
 ## Data Sources & Feeds
 - **Coinbase WS** (`shared/ws/spot.py: SpotWSFeed`) — primary spot price for BTC/ETH/SOL/XRP
-- **Kraken WS** (`shared/ws/spot.py: KrakenWSFeed`) — secondary spot price for cross-validation (Kalshi resolves on CF Benchmarks which samples multiple exchanges)
-- **Kalshi WS** (`shared/ws/kalshi.py: KalshiWSManager`) — real-time order book updates (yes/no bid/ask/size/volume)
-- **PM Market WS** (`shared/ws/polymarket.py: PolymarketMarketWSFeed`) — PM order book, trades, and market_resolved events
-- **PM RTDS** (`shared/ws/polymarket.py: PolymarketRTDSFeed`) — Polymarket's Binance/Chainlink price feed (PM resolution source)
-- All WS feeds push typed dataclass updates onto `asyncio.Queue` for consumption by bots/collectors
-
-## Key Data Files
-- `data/rounds/KXBTC15M-YYYY-MM-DD.csv` — Kalshi round snapshots (one per coin per day)
-- `data/rounds/polymarket/BTC-5m-YYYY-MM-DD.csv` — PM round snapshots (one per coin per duration per day)
-- `data/trades/kalshi-crypto-multi-YYYY-MM-DD.csv` — bot trade logs
-- `data/alerts/YYYY-MM-DD.log` — human-readable alert timeline
-- `data/circuit_breaker.json` — persisted circuit breaker state (ATH, consecutive losses, stopped_for_day)
-- `data/lifecycle.json` — bot version lifecycle metadata
-
-## PM Data Quality (IMPORTANT)
-PM collector had bugs fixed on 2026-03-17. Data before this date has known issues:
-- **Kalshi data**: Fully reliable, no issues.
-- **PM data before 2026-03-17**: `up_bid`, `up_ask`, `up_midpoint`, `spread`, `down_bid`, `down_ask` are UNRELIABLE (best_bid_ask events were misattributed between tokens). `outcome` is "unknown" for 7-11% of rounds (only tracked UP token trades). **DO NOT use these columns from old PM data in analysis.**
-- **PM data from 2026-03-17+**: Fixed. Book attribution is per-token, DOWN trades are tracked (inferred as 1-down_price), outcome determination uses both tokens.
-- **Always usable** (old and new): `last_trade_price` (consistent UP-token view), `spot_price`, `kraken_price`, `rtds_price`, `volume`, timing fields, resolved outcomes.
-- See `research/data-verification.md` for the full verification report.
+- **Kraken WS** (`shared/ws/spot.py: KrakenWSFeed`) — secondary spot price for cross-validation
+- **Kalshi WS** (`shared/ws/kalshi.py: KalshiWSManager`) — real-time order book updates
+- **PM Market WS** (`shared/ws/polymarket.py: PolymarketMarketWSFeed`) — PM order book, trades, market_resolved
+- **PM RTDS** (`shared/ws/polymarket.py: PolymarketRTDSFeed`) — Polymarket's Binance/Chainlink price feed
+- All WS feeds push typed dataclass updates onto `asyncio.Queue`
 
 ## Conventions
 - Python 3.9+, async-first (httpx, websockets)
@@ -61,13 +53,6 @@ PM collector had bugs fixed on 2026-03-17. Data before this date has known issue
 - `python scripts/performance.py --sync` — Same, but rsync alert logs from VM first
 - `ruff check .` — Lint
 
-## Versioning & Performance Tracking
-- Bot versions are git-tagged: `bot-v1`, `bot-v2`, etc. Tag on meaningful strategy/code changes.
-- `data/lifecycle.json` — Tracks bot lifecycle: version, start time, starting balance, deposits, withdrawals
-- `scripts/performance.py` — Performance report using Kalshi API (fills + settlements) as source of truth, alert logs for signal analytics
-- Each version in lifecycle.json has a `start_time_utc` — only fills after this time are counted for that version's P&L
-- When deploying a new bot version: update lifecycle.json with new version entry, tag git (`git tag -a bot-vN -m "description"`)
-
 ## Deployment & Operations
 - GCP VM: `<GCP_ZONE>`, `<VM_IP>`, e2-small (2GB RAM)
 - GCP project: `<GCP_PROJECT>` (named "Bots"), account: `kshjhun@gmail.com`
@@ -82,31 +67,9 @@ PM collector had bugs fixed on 2026-03-17. Data before this date has known issue
 - Paper trade every strategy before going live
 - Position sizing must be derived from validated data — never assume win rates or edge sizes without sufficient sample (96+ rounds minimum). Use fractional Kelly at most.
 
-## Research Workflow
-When the user shares a research article, paper, link, or interesting finding:
-1. **Read/fetch** the content and understand it
-2. **Add to `research/sources.md`** — title, URL, date, tags, one-line summary
-3. **Extract key insights into `research/insights.md`** — file under the right topic heading, reference the source
-4. **Flag anything actionable** — if an insight contradicts current strategy, suggests a new strategy, or changes risk parameters, call it out explicitly so we can discuss whether to act on it
-5. **Update research files if needed** — if findings are directly relevant to our current strategies, integrate into the appropriate research file
-
-The `research/` directory is our knowledge base:
-- `research/sources.md` — Index of all sources with tags and summaries
-- `research/insights.md` — Extracted insights organized by topic
-- `research/kalshi-mechanics.md` — How Kalshi crypto markets work (resolution, fees, limits, discovery)
-- `research/polymarket-mechanics.md` — How PM crypto markets work (resolution, tokens, WS events)
-- `research/polymarket-roadmap.md` — What to do with PM data: analysis plan, strategy ideas, infrastructure
-- `research/empirical-findings.md` — Our own data analysis results
-- `research/strategy-evaluation.md` — What we've tested: ruled out, validated, deferred
-- `research/open-questions.md` — TODOs and things to investigate
-- `research/v3-analysis-summary.md` — Consolidated V3 analysis (Mar 17, 2,529 rounds)
-
 ## Strategy Principles
 - No assumed edge — every strategy must be validated from data before going live
 - EV per contract matters more than WR alone
 - Paper trade every strategy before going live
 - WebSocket over REST — by the time REST round-trips, opportunity is gone
 - Simple mechanical rules over complex models
-
-## TODO
-- Remind me to rotate Kalshi and Telegram API keys since you used cat .env and exposed them. 
