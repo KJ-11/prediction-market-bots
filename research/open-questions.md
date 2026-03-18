@@ -1,22 +1,22 @@
 # Open Questions & TODOs
 
-## Confidence Parameter Validation — CRITICAL, ONGOING
-Strategy hardcodes `confidence=0.88` (from 219-round backtest). Kelly sizer uses this to size positions.
-- v2 backtest (644 rounds): 83.3% WR. Kelly produces positive sizes at v2's cheaper avg price ($0.76).
-- **The 0.88 confidence is the single biggest assumption in the system.**
+## CRITICAL: V3 Analysis Says Stop Live Trading (2026-03-17)
 
-**Action plan:**
-1. Collect 50+ v2 trades without changing anything
-2. At 50 trades, evaluate:
-   - WR 85%+: confidence=0.88 justified, deposit to $100, compound
-   - WR 80-84%: lower confidence param to match actual WR, reduce sizing
-   - WR <80%: stop live, return to paper, investigate
-3. Longer term: consider making confidence dynamic (rolling WR from last N trades)
+**Status (2026-03-18):** bot-v2 paused, strategy rework underway. PM collector bugs fixed (2026-03-17). Codebase cleanup in progress — consolidating research, archiving dead code, preparing clean foundation for next strategy iteration.
 
-**Simulation results (Mar 9):**
-- At 88% true WR: $1,000 in ~5 days, $5,000 in ~7 days
-- At 85% true WR: $1,000 in ~7 days, $5,000 in ~10 days
-- At 80% true WR: $1,000 in ~29 days, 5% bust risk (oversized for actual edge)
+V3 comprehensive analysis (2,529 rounds, 9 days) found:
+- **bot-v2 all-coin EV is negative** (~$-0.016/trade). BTC and XRP drag ETH down.
+- **ETH-only is marginally positive** (~$+0.012/trade) but NOT statistically significant
+- **153 of 170 tested parameter combos are negative EV at the ask**
+
+**Immediate actions:**
+1. ~~Switch to paper trading or kill live bot~~ — DONE, bot-v2 paused
+2. ~~Fix PM collector (inverted up/down tokens)~~ — DONE (2026-03-17)
+3. Continue collecting data for 2-3 more weeks
+4. Re-analyze at 5,000+ rounds per coin
+
+## Confidence Parameter — RESOLVED, MOOT
+The 0.88 confidence parameter is irrelevant if the strategy is negative EV. When we resume live trading with a validated strategy, confidence should be set to the observed WR from 500+ signal events, not hardcoded.
 
 ## Exit Management
 Currently hold all positions to expiry. Potential improvements:

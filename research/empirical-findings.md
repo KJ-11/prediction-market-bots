@@ -1,5 +1,9 @@
 # Empirical Findings
 
+---
+
+## Archive: Pre-V3 Analysis (Mar 6-9)
+
 *Validated with 109+ rounds per coin across 24h collection (Mar 6-7, 2026). Analysis scripts: `scripts/analyze_rounds.py`, `scripts/analyze_liquidity.py`.*
 
 ## 1. Contract Repricing Speed (REVISED)
@@ -88,6 +92,8 @@ Shifted to T+300-540 window with 0.2% distance threshold. Prices are ~$0.70-0.85
 | XRP  | $0.045 | $0.024 | $0.025 | $0.024 |
 
 ---
+
+## Current: V3 Analysis (Mar 17)
 
 ## V3 Analysis Findings (Mar 17, 2026 — 2,529 rounds over 9 days)
 
