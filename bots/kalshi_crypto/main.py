@@ -106,6 +106,22 @@ async def _midnight_summary_task(
         daily_stats["signals"] = 0
 
 
+async def _sleep_until_midnight_cst(runner: BotRunner) -> None:
+    """Sleep until midnight CST, or until shutdown is requested."""
+    now = datetime.now(CST)
+    tomorrow = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    sleep_secs = (tomorrow - now).total_seconds()
+    logger.info("Sleeping %.0f seconds until midnight CST", sleep_secs)
+    try:
+        await asyncio.wait_for(
+            runner.shutdown_event.wait(), timeout=sleep_secs,
+        )
+    except asyncio.TimeoutError:
+        pass
+
+
 async def run_bot(
     settings: Settings,
     series_arg: str,
@@ -236,21 +252,7 @@ async def run_bot(
                 await alerts.kill_switch_triggered(str(e))
                 # Sleep until midnight CST instead of exiting, so Docker
                 # doesn't restart-loop us.
-                now = datetime.now(CST)
-                tomorrow = (now + timedelta(days=1)).replace(
-                    hour=0, minute=0, second=0, microsecond=0,
-                )
-                sleep_secs = (tomorrow - now).total_seconds()
-                logger.info(
-                    "Kill switch: sleeping %.0f seconds until midnight CST",
-                    sleep_secs,
-                )
-                try:
-                    await asyncio.wait_for(
-                        runner.shutdown_event.wait(), timeout=sleep_secs,
-                    )
-                except asyncio.TimeoutError:
-                    pass
+                await _sleep_until_midnight_cst(runner)
                 # After midnight, reset ATH + breaker for fresh start
                 balance = await engine.get_balance()
                 breaker.reset_ath(balance)
@@ -265,20 +267,7 @@ async def run_bot(
                 )
                 # Sleep until midnight CST instead of exiting, so Docker
                 # doesn't restart-loop us back into the same breaker state.
-                now = datetime.now(CST)
-                tomorrow = (now + timedelta(days=1)).replace(
-                    hour=0, minute=0, second=0, microsecond=0,
-                )
-                sleep_secs = (tomorrow - now).total_seconds()
-                logger.info(
-                    "Sleeping %.0f seconds until midnight CST reset", sleep_secs,
-                )
-                try:
-                    await asyncio.wait_for(
-                        runner.shutdown_event.wait(), timeout=sleep_secs,
-                    )
-                except asyncio.TimeoutError:
-                    pass
+                await _sleep_until_midnight_cst(runner)
                 # After midnight, reset breaker for new day
                 breaker.set_day_start_balance(balance)
                 continue
@@ -422,6 +411,58 @@ async def run_bot(
         await spot_feed.stop()
         await kalshi_ws.stop()
         await client.close()
+
+
+async def _fetch_market_result(
+    client: KalshiClient,
+    ticker: str,
+) -> Outcome | None:
+    """Fetch market result from Kalshi API, retrying once after 30s if not settled."""
+    try:
+        market = await client.fetch_market(ticker)
+        result_str = market.get("result") if market else None
+        if result_str not in ("yes", "no"):
+            await asyncio.sleep(30)
+            market = await client.fetch_market(ticker)
+            result_str = market.get("result") if market else None
+    except Exception as e:
+        logger.warning("Failed to fetch result for %s: %s", ticker, e)
+        return None
+    if result_str == "yes":
+        return Outcome.YES
+    elif result_str == "no":
+        return Outcome.NO
+    return None
+
+
+def _compute_fill_pnl(
+    fill: dict,
+    winner: Outcome,
+) -> tuple[Decimal, str]:
+    """Compute P&L and format line for a single fill.
+
+    Returns (pnl, formatted_line).
+    """
+    price = fill["price"]
+    size = fill["size"]
+    coin = fill["coin"]
+    outcome_str = fill["outcome"].value.upper()
+    # Fee: ceil(0.07 * contracts * P * (1-P))
+    fee_raw = Decimal("0.07") * size * price * (1 - price)
+    fee = (fee_raw * 100).to_integral_value() / 100  # ceil to cent
+    if fill["outcome"] == winner:
+        pnl = (1 - price) * size - fee
+        line = (
+            f"\u2705 {coin}: {outcome_str} "
+            f"@ ${price} x{int(size)} \u2192 WON +${pnl:.2f}"
+        )
+    else:
+        pnl = -price * size - fee
+        line = (
+            f"\u274c {coin}: {outcome_str} "
+            f"@ ${price} x{int(size)} \u2192 LOST ${pnl:.2f}"
+        )
+    return pnl, line
 
 
 async def _run_round(
@@ -664,29 +705,16 @@ async def _run_round(
                 # Reuse market results already fetched for live P&L
                 winning = market_results.get(ctx.ticker)
                 if winning is None:
-                    try:
-                        market = await client.fetch_market(ctx.ticker)
-                        result_str = market.get("result") if market else None
-                        if result_str not in ("yes", "no"):
-                            await asyncio.sleep(30)
-                            market = await client.fetch_market(ctx.ticker)
-                            result_str = market.get("result") if market else None
-                    except Exception as e:
-                        logger.warning("Settlement fetch failed for %s: %s", ctx.ticker, e)
-                        result_str = None
-                    if result_str == "yes":
-                        winning = Outcome.YES
-                    elif result_str == "no":
-                        winning = Outcome.NO
-                    else:
-                        spot = latest_spots.get(series)
-                        if spot is None:
-                            continue
-                        winning = Outcome.YES if spot > ctx.floor_strike else Outcome.NO
-                        logger.warning(
-                            "Kalshi not settled for %s, using spot fallback",
-                            ctx.ticker,
-                        )
+                    winning = await _fetch_market_result(client, ctx.ticker)
+                if winning is None:
+                    spot = latest_spots.get(series)
+                    if spot is None:
+                        continue
+                    winning = Outcome.YES if spot > ctx.floor_strike else Outcome.NO
+                    logger.warning(
+                        "Kalshi not settled for %s, using spot fallback",
+                        ctx.ticker,
+                    )
                 for label, eng in engines_to_settle:
                     settle_pnl = await eng.settle_market(
                         ctx.ticker, winning,
@@ -704,33 +732,15 @@ async def _run_round(
         # Compute P&L from actual fills + market resolution (not balance delta)
         round_pnl = Decimal("0")
         round_wins = 0
-        market_results: dict[str, Outcome | None] = {}
 
         if live_fills:
             # Fetch market results for tickers we traded
             traded_tickers = {f["ticker"] for f in live_fills}
             for ticker in traded_tickers:
-                try:
-                    market = await client.fetch_market(ticker)
-                    result_str = market.get("result") if market else None
-                    if result_str == "yes":
-                        market_results[ticker] = Outcome.YES
-                    elif result_str == "no":
-                        market_results[ticker] = Outcome.NO
-                    else:
-                        # Not settled yet, wait more
-                        await asyncio.sleep(30)
-                        market = await client.fetch_market(ticker)
-                        result_str = market.get("result") if market else None
-                        if result_str == "yes":
-                            market_results[ticker] = Outcome.YES
-                        elif result_str == "no":
-                            market_results[ticker] = Outcome.NO
-                        else:
-                            market_results[ticker] = None
-                except Exception as e:
-                    logger.warning("Failed to fetch result for %s: %s", ticker, e)
-                    market_results[ticker] = None
+                if ticker not in market_results:
+                    market_results[ticker] = await _fetch_market_result(
+                        client, ticker,
+                    )
 
             # Calculate P&L per fill and build coin lines
             for fill in live_fills:
@@ -739,31 +749,15 @@ async def _run_round(
                     logger.warning("No result for %s, can't compute P&L", fill["ticker"])
                     coin_lines.append(f"{fill['coin']}: result unknown")
                     continue
-                price = fill["price"]
-                size = fill["size"]
-                # Fee: ceil(0.07 * contracts * P * (1-P))
-                fee_raw = Decimal("0.07") * size * price * (1 - price)
-                fee = (fee_raw * 100).to_integral_value() / 100  # ceil to cent
+                fill_pnl, line = _compute_fill_pnl(fill, winner)
                 if fill["outcome"] == winner:
-                    # Won: revenue = $1 * size, cost = price * size
-                    fill_pnl = (1 - price) * size - fee
                     round_wins += 1
-                    coin_lines.append(
-                        f"\u2705 {fill['coin']}: {fill['outcome'].value.upper()} "
-                        f"@ ${price} x{int(size)} \u2192 WON +${fill_pnl:.2f}"
-                    )
-                else:
-                    # Lost: lose entire cost
-                    fill_pnl = -price * size - fee
-                    coin_lines.append(
-                        f"\u274c {fill['coin']}: {fill['outcome'].value.upper()} "
-                        f"@ ${price} x{int(size)} \u2192 LOST ${fill_pnl:.2f}"
-                    )
+                coin_lines.append(line)
                 round_pnl += fill_pnl
                 logger.info(
-                    "Fill P&L: %s %s @ $%.2f x%s → %s won → $%+.4f (fee $%.4f)",
+                    "Fill P&L: %s %s @ $%.2f x%s → %s won → $%+.4f",
                     fill["outcome"].value, fill["ticker"],
-                    price, size, winner.value, fill_pnl, fee,
+                    fill["price"], fill["size"], winner.value, fill_pnl,
                 )
 
         # Add skip reasons for coins that had signals but didn't trade
@@ -792,30 +786,14 @@ async def _run_round(
                     if winner is None:
                         shadow_lines.append(f"{sf['coin']}: result unknown")
                         continue
-                    sp = sf["price"]
-                    ss = sf["size"]
-                    sf_fee_raw = Decimal("0.07") * ss * sp * (1 - sp)
-                    sf_fee = (sf_fee_raw * 100).to_integral_value() / 100
-                    if sf["outcome"] == winner:
-                        sf_pnl = (1 - sp) * ss - sf_fee
-                        shadow_lines.append(
-                            f"\u2705 {sf['coin']}: {sf['outcome'].value.upper()} "
-                            f"@ ${sp} x{int(ss)} \u2192 +${sf_pnl:.2f}"
-                        )
-                    else:
-                        sf_pnl = -sp * ss - sf_fee
-                        shadow_lines.append(
-                            f"\u274c {sf['coin']}: {sf['outcome'].value.upper()} "
-                            f"@ ${sp} x{int(ss)} \u2192 ${sf_pnl:.2f}"
-                        )
+                    sf_pnl, sf_line = _compute_fill_pnl(sf, winner)
+                    shadow_lines.append(sf_line)
                     shadow_round_pnl += sf_pnl
                 detail = "\n".join(shadow_lines)
                 shadow_summary = (
                     f"{detail}\n"
                     f"P&L: ${shadow_round_pnl:+.2f} | Balance: ${shadow_bal:.2f}"
                 )
-            elif round_signals > 0:
-                shadow_summary = f"no trades | ${shadow_bal:.2f}"
             else:
                 shadow_summary = f"no trades | ${shadow_bal:.2f}"
 

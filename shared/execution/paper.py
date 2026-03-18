@@ -56,7 +56,7 @@ class PaperExecutionEngine(AbstractExecutionEngine):
         try:
             data = json.loads(self._balance_file.read_text())
             return Decimal(data["balance"])
-        except (FileNotFoundError, KeyError, json.JSONDecodeError, Exception):
+        except Exception:
             return None
 
     def _save_balance(self) -> None:

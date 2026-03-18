@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -171,8 +172,6 @@ class RiskLimits:
             )
 
         # Rate limit check
-        import time
-
         now = time.monotonic()
         self._recent_orders = [
             t for t in self._recent_orders if now - t < 60
@@ -187,8 +186,6 @@ class RiskLimits:
 
     def record_order(self) -> None:
         """Record that an order was placed (for rate limiting)."""
-        import time
-
         self._recent_orders.append(time.monotonic())
 
 
