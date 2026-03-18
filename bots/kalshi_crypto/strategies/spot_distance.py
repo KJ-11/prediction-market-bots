@@ -1,3 +1,5 @@
+# Concrete strategy. Trades when spot is far from strike.
+
 """Spot-distance strategy: trade when spot is far from strike.
 
 v2 — Mar 10, 2026. Changes based on 644-round tick-accurate backtest:

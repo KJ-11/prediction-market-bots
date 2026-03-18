@@ -1,3 +1,5 @@
+# Market discovery. Find active markets for this round.
+
 """Market discovery — find the currently active 15-min crypto market."""
 
 from __future__ import annotations

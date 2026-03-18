@@ -5,7 +5,7 @@ Exploring and building prediction market trading strategies across multiple vert
 
 ## Project Structure
 - `shared/` — Reusable infrastructure (clients, execution, risk, alerts, ws, utils)
-- `bots/kalshi_crypto/` — Reference bot implementation (template for new bots)
+- `bots/kalshi_crypto/` — Reference bot implementation (template for new bots: main.py is setup+loop, round.py is per-round execution)
 - `scripts/` — Data collectors (`collect_rounds.py`, `collect_polymarket.py`), performance reporting, smoke tests
 - `tests/` — Test suite
 - `data/` — Trade logs, round snapshots, alert logs, circuit breaker state, lifecycle metadata

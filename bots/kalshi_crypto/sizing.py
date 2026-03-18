@@ -1,3 +1,5 @@
+# Position sizing. Kelly criterion with Kalshi fee model.
+
 """Position sizing — fractional Kelly criterion for Kalshi contracts."""
 
 from __future__ import annotations

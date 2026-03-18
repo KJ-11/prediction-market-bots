@@ -1,3 +1,5 @@
+# Strategy interface. RoundContext, TradeSignal, BaseStrategy ABC.
+
 """Strategy base class and round context for 15-min crypto markets."""
 
 from __future__ import annotations
