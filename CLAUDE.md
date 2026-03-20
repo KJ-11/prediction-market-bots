@@ -1,7 +1,7 @@
 # Prediction Market Trading Bots
 
 ## Current Focus
-Exploring and building prediction market trading strategies across multiple verticals. Current infrastructure covers Kalshi crypto markets and Polymarket data collection. Strategy is being reworked from the ground up — no assumed edge.
+Building prediction market trading bots across Kalshi and Polymarket. Crypto (15-min binary markets) is the first vertical, but the shared infrastructure and bot template pattern (`shared/` + `bots/<vertical>/`) are designed to expand into elections, sports, economic indicators, weather, and any other Kalshi/PM market type. Strategy is being reworked from the ground up — no assumed edge.
 
 ## Project Structure
 - `shared/` — Reusable infrastructure (clients, execution, risk, alerts, ws, utils)
@@ -54,12 +54,14 @@ Use `bots/kalshi_crypto/` as the template. The pattern:
 - `ruff check .` — Lint
 
 ## Deployment & Operations
+- **Deploy method: rsync to GCP VM. NEVER use `git pull` on the VM.**
 - GCP VM: `<GCP_ZONE>`, `<VM_IP>`, e2-small (2GB RAM)
 - GCP project: `<GCP_PROJECT>` (named "Bots"), account: `kshjhun@gmail.com`
   - NOT `profitlabs` — that is a different project with a different account (`<CONTACT_EMAIL>`)
 - 21 Docker services: bot + 4 Kalshi collectors + 16 PM collectors (4 coins x 4 durations)
 - See `OPS.md` for full operations guide (health checks, logs, data, deploy, emergency controls)
 - SSH: `gcloud compute ssh <VM_NAME> --zone=<GCP_ZONE> --project=<GCP_PROJECT>`
+- When diagnosing production issues, always check VM state (SSH + docker logs), not local state.
 
 ## Risk Rules
 - Never place orders without kill switch check
@@ -73,3 +75,6 @@ Use `bots/kalshi_crypto/` as the template. The pattern:
 - Paper trade every strategy before going live
 - WebSocket over REST — by the time REST round-trips, opportunity is gone
 - Simple mechanical rules over complex models
+
+## Vault
+KJ's general-purpose Obsidian vault lives at `Code/Vault/`. It contains marketing content, research, project notes, and personal writing across all projects. When research or notes are relevant, save them there.
