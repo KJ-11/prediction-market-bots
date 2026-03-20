@@ -40,14 +40,32 @@ Open interest on a single BTC round can exceed 50k contracts.
 Liquidity is NOT a constraint until thousands of contracts per trade. Top-of-book (WS `yes_ask_size_fp`) is much smaller than full depth — at scale, walk the book across price levels.
 
 ## Fee Structure
-- **Formula**: `$0.07 * P * (1 - P)` per contract, where P = contract price in dollars
-- Both maker and taker fees apply (maker fees added April 2025)
-- Fee examples:
-  - At $0.50 (max): ~$0.0175/contract
-  - At $0.20 or $0.80: ~$0.0112/contract
-  - At $0.10 or $0.90: ~$0.0063/contract
-  - At $0.05 or $0.95: ~$0.0033/contract
-- Fees are lowest at price extremes — relevant for late-round trading
+
+### When fees are charged
+- **On every executed trade** (entry buy, early exit sell)
+- **NOT on settlement/expiration** — if you hold to resolution, you pay fee once on entry only
+- Implication: buy-and-hold-to-settlement pays 1 fee; buy-then-sell-early pays 2 fees
+
+### Taker fee (IOC / immediate fills)
+- **Formula**: `round_up(0.07 * C * P * (1 - P))` per order
+- C = contracts, P = price in dollars, rounding up to nearest cent on total order
+
+### Maker fee (resting limit orders that get filled)
+- **Formula**: `round_up(0.0175 * C * P * (1 - P))` per order
+- Maker coefficient is exactly 1/4 of taker (75% cheaper)
+- Added July 2025 (replaced flat $0.0025/contract)
+
+### Fee examples (per contract)
+| Price | Taker fee | Maker fee |
+|-------|-----------|-----------|
+| $0.50 | $0.0175 | $0.0044 |
+| $0.80 | $0.0112 | $0.0028 |
+| $0.90 | $0.0063 | $0.0016 |
+| $0.95 | $0.0033 | $0.0008 |
+| $0.10 | $0.0063 | $0.0016 |
+
+- Fees peak at P=0.50 and drop toward extremes — favorable for late-round trading
+- S&P/Nasdaq markets use halved multipliers (0.035/0.00875) — does NOT apply to crypto
 
 ## Position Limit
 - $25,000 per strike, per member

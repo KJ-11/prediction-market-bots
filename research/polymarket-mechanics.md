@@ -128,10 +128,46 @@ Message format:
 Symbols: `btcusdt`, `ethusdt`, `solusdt`, `xrpusdt`
 
 ## Fee Structure
-- **Maker**: varies (check current rates)
-- **Taker**: varies (check current rates)
+
+### When fees are charged
+- **Taker fee on every executed trade** (entry and exit)
+- **Maker fee: 0%** — makers pay nothing and receive rebates via the Maker Rebates Program
+- **NOT on settlement/resolution** — winning shares pay $1 USDC with no deduction
+- **2% of net profits at withdrawal** (Global only) — functions as a deferred profit fee
 - **Gas**: Polygon transaction fees for on-chain settlement (minimal, ~$0.01)
-- **TODO**: Need to document exact fee schedule once we start trading
+
+### Taker fee formula (crypto markets)
+```
+fee = C * p * feeRate * (p * (1 - p))^exponent
+```
+- `C` = shares, `p` = price (0 to 1)
+- **Crypto**: feeRate=0.25, exponent=2 (quadratic — steeper than Kalshi's linear P*(1-P))
+- **Sports**: feeRate=0.0175, exponent=1 (much cheaper)
+
+### Fee examples — crypto markets (per contract)
+| Price | Taker fee | % of notional |
+|-------|-----------|---------------|
+| $0.50 | $0.0078 | 1.56% |
+| $0.60 | $0.0086 | 1.44% |
+| $0.80 | $0.0064 | 0.80% |
+| $0.90 | $0.0020 | 0.22% |
+| $0.20 | $0.0064 | 3.20% |
+
+Peak fee at p=0.50 is ~1.56% of notional. Drops toward extremes due to the (p*(1-p))^2 term.
+
+### Maker rebates
+- 20% of taker fees paid back daily to liquidity providers (crypto markets)
+- 25% rebate for sports markets
+
+### Crypto fee rollout timeline
+- Jan 19, 2026 — 15-min crypto markets (first to get fees)
+- Feb 12, 2026 — 5-min crypto markets
+- Mar 6, 2026 — 1H, 4H, daily, weekly crypto markets
+- Only applies to markets deployed after activation dates
+
+### API
+- Fetch fee rate per token: `GET https://clob.polymarket.com/fee-rate?token_id={token_id}`
+- SDK auto-fetches; REST requires manual `feeRateBps` in signed orders
 
 ## Volume & Liquidity (TBD)
 Data collection started Mar 10, 2026. Need 48+ hours of data to characterize:
