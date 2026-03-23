@@ -58,6 +58,7 @@ Use `bots/kalshi_crypto/` as the template. The pattern:
 - GCP VM: `<GCP_ZONE>`, `<VM_IP>`, e2-small (2GB RAM)
 - GCP project: `<GCP_PROJECT>` (named "Bots"), account: `kshjhun@gmail.com`
   - NOT `profitlabs` — that is a different project with a different account (`<CONTACT_EMAIL>`)
+- **GCP config:** Always use `gcloud config configurations activate bots` before running gcloud commands. Verify with `gcloud config configurations list`.
 - 21 Docker services: bot + 4 Kalshi collectors + 16 PM collectors (4 coins x 4 durations)
 - See `OPS.md` for full operations guide (health checks, logs, data, deploy, emergency controls)
 - SSH: `gcloud compute ssh <VM_NAME> --zone=<GCP_ZONE> --project=<GCP_PROJECT>`
@@ -76,5 +77,25 @@ Use `bots/kalshi_crypto/` as the template. The pattern:
 - WebSocket over REST — by the time REST round-trips, opportunity is gone
 - Simple mechanical rules over complex models
 
-## Vault
-KJ's general-purpose Obsidian vault lives at `Code/Vault/`. It contains marketing content, research, project notes, and personal writing across all projects. When research or notes are relevant, save them there.
+## Before Going Live Checklist
+1. Paper trade for 96+ rounds minimum with sufficient sample across market conditions
+2. Validate edge from data — no assumed win rates or edge sizes
+3. Confirm risk limits are set (percentage-based)
+4. Verify kill switch works (`touch KILL` in project root)
+5. Check circuit breaker state is clean (`data/circuit_breaker.json`)
+6. Set `PAPER_TRADING=false` explicitly (default is paper mode)
+7. Monitor first live session end-to-end via Telegram alerts
+
+## Git & Accounts
+
+- **SSH remote:** `github-personal` (key: `~/.ssh/id_ed25519_personal`)
+- **GCP:** `gcloud config configurations activate bots` → `kshjhun@gmail.com` / project `<GCP_PROJECT>`. **NOT** the ProfitLabs account.
+- **Supabase:** Not used in this project.
+
+## Vault Integration
+
+Research findings (strategy research, market mechanics) get routed to `Code/Vault/Projects/Bots/actions.md`. Strategy notes go in `Code/Vault/Projects/Bots/Notes/`.
+
+## Lessons Learned
+
+_(Add entries as the project progresses. Format: what happened and what to do instead.)_
