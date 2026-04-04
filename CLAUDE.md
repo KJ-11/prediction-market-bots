@@ -88,7 +88,6 @@ Use `bots/kalshi_crypto/` as the template. The pattern:
 
 ## Git & Accounts
 
-- **SSH remote:** `github-personal` (key: `~/.ssh/id_ed25519_personal`)
 - **GCP:** `gcloud config configurations activate bots` → `kshjhun@gmail.com` / project `<GCP_PROJECT>`. **NOT** the ProfitLabs account.
 - **Supabase:** Not used in this project.
 
