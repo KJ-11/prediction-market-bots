@@ -40,6 +40,7 @@ class BotRunner:
         self._bot_name = bot_name
         self._alerts = alerts
         self._shutdown_event: asyncio.Event | None = None
+        self._stop_alerted = False
 
     def _ensure_event(self) -> asyncio.Event:
         """Create Event lazily inside the running loop (Python 3.9 compat)."""
@@ -83,7 +84,8 @@ class BotRunner:
             logger.info("[%s] Bot started", self._bot_name)
             await async_fn(*args, **kwargs)
 
-            await self._alerts.bot_stopped("normal shutdown")
+            if not self._stop_alerted:
+                await self._alerts.bot_stopped("normal shutdown")
             logger.info("[%s] Bot stopped normally", self._bot_name)
 
         except KillSwitchTriggered as e:
@@ -94,7 +96,8 @@ class BotRunner:
         except asyncio.CancelledError:
             exit_code = EXIT_NORMAL
             logger.info("[%s] Bot cancelled", self._bot_name)
-            await self._alerts.bot_stopped("cancelled")
+            if not self._stop_alerted:
+                await self._alerts.bot_stopped("cancelled")
 
         except Exception as e:
             exit_code = EXIT_CRASH
@@ -104,6 +107,9 @@ class BotRunner:
         return exit_code
 
     def _handle_signal(self, sig: signal.Signals) -> None:
-        """Signal handler — sets shutdown event for graceful exit."""
+        """Signal handler — sends alert immediately, then requests graceful exit."""
         logger.info("[%s] Received %s, shutting down...", self._bot_name, sig.name)
         self._ensure_event().set()
+        # Fire alert now — don't rely on graceful shutdown reaching bot_stopped()
+        self._stop_alerted = True
+        asyncio.ensure_future(self._alerts.bot_stopped(f"signal {sig.name}"))
