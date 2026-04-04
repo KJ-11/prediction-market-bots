@@ -28,10 +28,11 @@ from bots.kalshi_crypto.discovery import (
 )
 from bots.kalshi_crypto.round import _sleep_until_midnight_cst, run_round
 from bots.kalshi_crypto.sizing import PositionSizer, SizingMode
-from bots.kalshi_crypto.strategies.spot_distance import SpotDistanceStrategy
-from bots.kalshi_crypto.strategy import RoundContext
+from bots.kalshi_crypto.strategies.cascade import CascadeStrategy
+from bots.kalshi_crypto.strategy import BaseStrategy, RoundContext
 from shared.alerts.manager import CST, AlertManager
 from shared.clients.kalshi import KalshiClient
+from shared.clients.polymarket import PolymarketClient
 from shared.config import Settings
 from shared.execution.kalshi import KalshiExecutionEngine
 from shared.execution.paper import PaperExecutionEngine
@@ -182,9 +183,14 @@ async def run_bot(
         kelly_fraction=0.30,
     )
 
-    # Strategies — one SpotDistanceStrategy per coin
-    strategies: dict[str, SpotDistanceStrategy] = {
-        series: SpotDistanceStrategy() for series in series_list
+    # PM client for cascade strategy signals
+    pm_client = PolymarketClient()
+    pm_signals: dict[str, str | None] = {}  # shared dict: coin → "up"/"down"/None
+
+    # Strategies — cascade (PM 5m → Kalshi YES) per coin
+    # SpotDistanceStrategy disabled (negative EV, see strategy-evaluation.md)
+    strategies: dict[str, BaseStrategy] = {
+        series: CascadeStrategy(pm_signals) for series in series_list
     }
 
     # Spot WS feed — 1 connection for all coins
@@ -348,6 +354,9 @@ async def run_bot(
                 window=window, coins=round_coins, balance=balance,
             )
 
+            # Reset PM signals for new round
+            pm_signals.clear()
+
             round_result = await run_round(
                 active_contexts=active_contexts,
                 strategies=strategies,
@@ -365,6 +374,8 @@ async def run_bot(
                 alerts=alerts,
                 window=window,
                 round_start_balance=balance,
+                pm_client=pm_client,
+                pm_signals=pm_signals,
             )
 
             # Update circuit breaker and daily stats
@@ -397,6 +408,7 @@ async def run_bot(
         await spot_feed.stop()
         await kalshi_ws.stop()
         await client.close()
+        await pm_client.close()
 
 
 def main() -> None:

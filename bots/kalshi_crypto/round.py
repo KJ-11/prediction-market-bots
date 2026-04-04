@@ -11,11 +11,12 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from bots.kalshi_crypto.discovery import SERIES_TO_COIN
+from bots.kalshi_crypto.pm_signal import start_pm_signal_tasks
 from bots.kalshi_crypto.sizing import PositionSizer
-from bots.kalshi_crypto.strategies.spot_distance import SpotDistanceStrategy
-from bots.kalshi_crypto.strategy import RoundContext, TradeSignal
+from bots.kalshi_crypto.strategy import BaseStrategy, RoundContext, TradeSignal
 from shared.alerts.manager import CST, AlertManager
 from shared.clients.kalshi import KalshiClient
+from shared.clients.polymarket import PolymarketClient
 from shared.execution.paper import PaperExecutionEngine
 from shared.risk import KillSwitch, RiskLimits
 from shared.runner import BotRunner
@@ -99,7 +100,7 @@ def _compute_fill_pnl(
 
 async def run_round(
     active_contexts: dict[str, RoundContext],
-    strategies: dict[str, SpotDistanceStrategy],
+    strategies: dict[str, BaseStrategy],
     engine,
     shadow_engine: PaperExecutionEngine | None,
     client: KalshiClient,
@@ -114,6 +115,8 @@ async def run_round(
     alerts: AlertManager,
     window: str,
     round_start_balance: Decimal = Decimal("0"),
+    pm_client: PolymarketClient | None = None,
+    pm_signals: dict[str, str | None] | None = None,
 ) -> dict:
     """Run all strategies for one 15-min round across all coins.
 
@@ -123,6 +126,16 @@ async def run_round(
     tickers = [ctx.ticker for ctx in active_contexts.values()]
     kalshi_ws.set_tickers(tickers)
     kalshi_ws_task = asyncio.create_task(kalshi_ws.start(), name="kalshi-ws-round")
+
+    # Start PM signal polling for cascade strategy
+    pm_signal_tasks: list[asyncio.Task] = []
+    pm_stop_event = asyncio.Event()
+    if pm_client is not None and pm_signals is not None:
+        any_ctx = next(iter(active_contexts.values()))
+        pm_coins = [ctx.coin for ctx in active_contexts.values()]
+        pm_signal_tasks = await start_pm_signal_tasks(
+            pm_client, pm_coins, any_ctx.close_time, pm_signals, pm_stop_event,
+        )
 
     # Build ticker -> series mapping for routing updates
     ticker_to_series: dict[str, str] = {
@@ -310,6 +323,15 @@ async def run_round(
             await kalshi_ws_task
         except asyncio.CancelledError:
             pass
+
+        # Stop PM signal polling
+        pm_stop_event.set()
+        for task in pm_signal_tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         # Cancel open orders
         for ctx in active_contexts.values():
