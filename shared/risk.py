@@ -154,13 +154,15 @@ class RiskLimits:
                 ),
             )
 
-        # Total exposure check
+        # Total exposure check — use equity (cash + positions) as denominator
+        # so that filled slots don't shrink the denominator and block new entries
         positions = await engine.get_positions()
         total_exposure = sum(
             p.size * p.avg_entry_price for p in positions
         )
+        equity = balance + total_exposure
         exposure_pct = float(
-            (total_exposure + trade_cost) / balance
+            (total_exposure + trade_cost) / equity
         ) * 100
         if exposure_pct > self._max_exposure_pct:
             return RiskCheckResult(
