@@ -10,6 +10,18 @@ services:
     volumes:
       - ./data:/app/data
 
+  whale:
+    build: .
+    image: prediction-market-bots
+    command: python -m bots.kalshi_whale.main
+    restart: always
+    env_file: .env
+    environment:
+      - TZ=America/Chicago
+      - PAPER_TRADING=true
+    volumes:
+      - ./data:/app/data
+
   # Kalshi collectors
   collector-btc:
     image: prediction-market-bots
