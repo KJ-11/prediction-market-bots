@@ -512,24 +512,16 @@ class TestSignalScoring:
 # ── Position monitor ────────────────────────────────────────────────
 
 class TestPositionMonitor:
-    def test_stop_price_calculation(self):
-        """Stop price should be 15% below entry."""
-        entry = Decimal("0.90")
-        stop = entry * (1 - Decimal("0.15"))
-        assert stop == Decimal("0.7650")
-
     def test_tracked_position_outcome(self):
         p = TrackedPosition(
             market_ticker="T1", side="yes",
             entry_price=Decimal("0.90"), size=10,
-            stop_price=Decimal("0.765"),
         )
         assert p.outcome == Outcome.YES
 
         p2 = TrackedPosition(
             market_ticker="T1", side="no",
             entry_price=Decimal("0.90"), size=10,
-            stop_price=Decimal("0.765"),
         )
         assert p2.outcome == Outcome.NO
 

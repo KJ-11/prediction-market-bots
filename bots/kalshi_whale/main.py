@@ -242,7 +242,6 @@ async def _signal_consumer(
 
         # Entry filled — start monitoring
         fill_price = resp.avg_fill_price or signal.best_ask
-        stop_price = fill_price * (1 - Decimal(str(config.stop_loss_pct)))
         filled_size = int(resp.filled_size)
 
         entry_fee = kalshi_fee(fill_price, filled_size)
@@ -279,7 +278,6 @@ async def _signal_consumer(
             side=signal.side,
             entry_price=fill_price,
             size=filled_size,
-            stop_price=stop_price,
             order_id=resp.order_id,
         ))
 
@@ -288,9 +286,9 @@ async def _signal_consumer(
             entered_events.add(event_ticker)
 
         logger.info(
-            "ENTERED: %s %s @ %.2f x%d stop=%.2f bal=$%.2f",
+            "ENTERED: %s %s @ %.2f x%d bal=$%.2f",
             signal.market_ticker, signal.side, fill_price, filled_size,
-            stop_price, balance,
+            balance,
         )
 
 

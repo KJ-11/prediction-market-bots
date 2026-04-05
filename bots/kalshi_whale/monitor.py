@@ -1,27 +1,25 @@
-# Position monitoring. Stop loss via WS price updates, resolution detection.
+# Position monitoring. Settlement detection via REST polling.
 
-"""Position monitor — tracks open positions for stop loss and resolution.
+"""Position monitor — tracks open positions until settlement.
 
-Watches price updates from the WhaleDetector's price_queue. Triggers stop
-loss exits when price drops below threshold. Detects market settlement
-via Kalshi positions API polling.
+Drains the price_queue to prevent backpressure. Detects market settlement
+via Kalshi market API polling (every 15s).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 
-from bots.kalshi_whale.sizing import kalshi_fee
 from bots.kalshi_whale.strategy import WhaleConfig
 from bots.kalshi_whale.tracking import WhaleTracker
 from shared.alerts.manager import AlertManager
 from shared.clients.kalshi import KalshiClient
 from shared.execution.base import AbstractExecutionEngine
 from shared.execution.paper import PaperExecutionEngine
-from shared.types import OrderRequest, OrderStatus, Outcome, PriceUpdate, Side
+from shared.types import Outcome, PriceUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +32,7 @@ class TrackedPosition:
     side: str  # "yes" or "no" — the consensus side we entered
     entry_price: Decimal
     size: int
-    stop_price: Decimal  # Exit if price drops below this
     order_id: str = ""
-    stop_triggered: bool = False
 
     @property
     def outcome(self) -> Outcome:
@@ -44,11 +40,10 @@ class TrackedPosition:
 
 
 class PositionMonitor:
-    """Monitors open positions for stop loss and resolution.
+    """Monitors open positions until settlement.
 
-    Two responsibilities:
-    1. Watch price_queue for stop loss triggers on open positions
-    2. Periodically poll Kalshi positions API to detect settlement
+    Drains the price_queue (prevents backpressure) and polls Kalshi's
+    market API to detect resolution. No stop loss — hold to settlement.
     """
 
     def __init__(
@@ -83,54 +78,30 @@ class PositionMonitor:
         return sum(
             p.entry_price * p.size
             for p in self._positions.values()
-            if not p.stop_triggered
         )
 
     @property
     def results(self) -> asyncio.Queue[tuple[str, Decimal]]:
-        """Queue of (ticker, pnl) for settled/stopped positions."""
+        """Queue of (ticker, pnl) for settled positions."""
         return self._results
 
     def add_position(self, pos: TrackedPosition) -> None:
         """Start monitoring a new position."""
         self._positions[pos.market_ticker] = pos
         logger.info(
-            "Monitor: tracking %s %s entry=%.2f size=%d stop=%.2f",
-            pos.market_ticker, pos.side, pos.entry_price, pos.size, pos.stop_price,
+            "Monitor: tracking %s %s entry=%.2f size=%d (hold to settlement)",
+            pos.market_ticker, pos.side, pos.entry_price, pos.size,
         )
 
     async def run_price_monitor(self) -> None:
-        """Consume price updates and check stop losses."""
+        """Consume price updates (drains queue to prevent backpressure)."""
         while True:
             try:
-                update = await asyncio.wait_for(
+                await asyncio.wait_for(
                     self._price_queue.get(), timeout=5.0,
                 )
             except asyncio.TimeoutError:
                 continue
-
-            ticker = update.market_id
-            pos = self._positions.get(ticker)
-            if pos is None or pos.stop_triggered:
-                continue
-
-            # Get current price for the side we're holding
-            if pos.side == "yes":
-                current_price = update.yes_price or update.yes_bid
-            else:
-                current_price = update.no_price or update.no_bid
-
-            if current_price is None:
-                continue
-
-            # Check stop loss
-            if current_price <= pos.stop_price:
-                logger.warning(
-                    "STOP LOSS: %s price=%.2f <= stop=%.2f (entry=%.2f)",
-                    ticker, current_price, pos.stop_price, pos.entry_price,
-                )
-                pos.stop_triggered = True
-                await self._execute_stop_loss(pos, current_price)
 
     async def run_settlement_poller(self) -> None:
         """Periodically check if positions have been settled by Kalshi.
@@ -149,8 +120,6 @@ class PositionMonitor:
             # Don't rely on positions API (empty response = false settlement).
             settled: list[tuple[str, str]] = []  # (ticker, result)
             for ticker, pos in list(self._positions.items()):
-                if pos.stop_triggered:
-                    continue
                 try:
                     market = await self._client.fetch_market(ticker)
                 except Exception as e:
@@ -213,70 +182,6 @@ class PositionMonitor:
                 )
 
                 await self._results.put((ticker, pnl))
-
-    async def _execute_stop_loss(
-        self, pos: TrackedPosition, current_price: Decimal,
-    ) -> None:
-        """Sell position at market to exit."""
-        order = OrderRequest(
-            market_id=pos.market_ticker,
-            side=Side.SELL,
-            outcome=pos.outcome,
-            price=current_price,
-            size=Decimal(str(pos.size)),
-        )
-
-        try:
-            resp = await self._engine.place_order(order)
-        except Exception as e:
-            logger.error("Stop loss order failed: %s: %s", pos.market_ticker, e)
-            # Remove from tracking even on failure — don't retry stop losses
-            self._positions.pop(pos.market_ticker, None)
-            return
-
-        filled = resp.status == OrderStatus.FILLED
-        fill_price = resp.avg_fill_price or current_price
-        exit_fee = kalshi_fee(fill_price, pos.size)
-        pnl = (fill_price - pos.entry_price) * pos.size - exit_fee
-
-        balance = await self._engine.get_balance()
-
-        self._tracker.log_stop_loss(
-            market_ticker=pos.market_ticker,
-            side=pos.side,
-            outcome=pos.side,
-            entry_price=pos.entry_price,
-            stop_price=pos.stop_price,
-            trigger_price=current_price,
-            actual_price=fill_price,
-            contracts=pos.size,
-            order_id=resp.order_id,
-            order_status=resp.status.value,
-            pnl=pnl,
-            balance_after=balance,
-        )
-
-        logger.info(
-            "Stop loss %s: %s fill=%.2f pnl=$%.2f bal=$%.2f",
-            "FILLED" if filled else "FAILED",
-            pos.market_ticker, fill_price, pnl, balance,
-        )
-
-        entry_cost = pos.entry_price * pos.size
-        await self._alerts._send(
-            "STOP LOSS",
-            "\U0001f6d1",
-            (
-                f"<b>{pos.market_ticker}</b>\n"
-                f"Entry: ${pos.entry_price} x{pos.size} | "
-                f"Exit: ${fill_price} x{pos.size}\n"
-                f"P&L: <b>${pnl:+.2f}</b> | "
-                f"Balance: <b>${balance:.2f}</b>"
-            ),
-        )
-
-        self._positions.pop(pos.market_ticker, None)
-        await self._results.put((pos.market_ticker, pnl))
 
     def remove_position(self, ticker: str) -> TrackedPosition | None:
         """Remove a position from tracking (e.g. manual exit)."""

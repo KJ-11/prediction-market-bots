@@ -18,7 +18,6 @@ class WhaleConfig:
     consensus_pct: float = 0.90  # Min % of whale volume on one side
     price_min: Decimal = Decimal("0.85")  # Entry price range
     price_max: Decimal = Decimal("0.95")
-    stop_loss_pct: float = 0.15  # Exit if price drops 15% from entry
     whale_window_min: int = 30  # All whale trades must be within this window
     categories: tuple[str, ...] = ("sports", "economics")
     max_concurrent: int = 2  # Max open positions at once
