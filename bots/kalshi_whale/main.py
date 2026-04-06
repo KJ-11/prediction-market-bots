@@ -222,9 +222,16 @@ async def _signal_consumer(
             )
             continue
 
-        # Entry filled — fetch real balance post-fill
+        # Entry filled — check we actually got contracts
         fill_price = resp.avg_fill_price or signal.best_ask
         filled_size = int(resp.filled_size)
+
+        if filled_size <= 0:
+            logger.warning(
+                "IOC executed but 0 fills: %s (ask moved?)",
+                signal.market_ticker,
+            )
+            continue
         entry_fee = kalshi_fee(fill_price, filled_size)
         cost = fill_price * filled_size
 
