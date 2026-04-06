@@ -44,10 +44,11 @@ def _map_kalshi_status(status: str) -> OrderStatus:
 def _get_fill_count(result: dict) -> int:
     """Extract fill count from Kalshi response.
 
-    Kalshi API returns fill_count_fp (current) or fill_count (legacy).
+    Kalshi API returns fill_count_fp (current, float string like "31.00")
+    or fill_count (legacy, int). Handle both.
     """
     count = result.get("fill_count_fp") or result.get("fill_count") or 0
-    return int(count)
+    return int(float(count))
 
 
 def _compute_fill_price(result: dict, outcome: str) -> Decimal | None:
@@ -238,7 +239,7 @@ class KalshiExecutionEngine(AbstractExecutionEngine):
                 outcome=Outcome.YES if o.get("side") == "yes" else Outcome.NO,
                 price=dec(o.get("yes_price")) or Decimal("0"),
                 size=dec(o.get("remaining_count")) or Decimal("0"),
-                filled_size=dec(o.get("fill_count")) or Decimal("0"),
+                filled_size=dec(o.get("fill_count_fp") or o.get("fill_count")) or Decimal("0"),
                 raw=o,
             ))
         return result
@@ -249,7 +250,7 @@ class KalshiExecutionEngine(AbstractExecutionEngine):
         for p in positions:
             ticker = p.get("ticker", "")
             for side_key, outcome in [("yes", Outcome.YES), ("no", Outcome.NO)]:
-                size = int(p.get(f"{side_key}_count", 0))
+                size = int(float(p.get(f"{side_key}_count", 0) or 0))
                 if size > 0:
                     result.append(Position(
                         market_id=ticker,
