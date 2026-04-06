@@ -123,9 +123,19 @@ class RiskLimits:
         self,
         order: OrderRequest,
         engine: AbstractExecutionEngine,
+        *,
+        balance: Decimal | None = None,
+        equity: Decimal | None = None,
     ) -> RiskCheckResult:
-        """Run all risk checks against an order."""
-        balance = await engine.get_balance()
+        """Run all risk checks against an order.
+
+        Args:
+            balance: Pre-fetched cash balance. If None, fetches from engine.
+            equity: Pre-fetched equity (cash + positions). If None, computes
+                    from engine.get_balance() + engine.get_positions().
+        """
+        if balance is None:
+            balance = await engine.get_balance()
         if balance <= 0:
             return RiskCheckResult(
                 allowed=False, reason="Zero balance",
@@ -156,20 +166,20 @@ class RiskLimits:
 
         # Total exposure check — use equity (cash + positions) as denominator
         # so that filled slots don't shrink the denominator and block new entries
-        positions = await engine.get_positions()
-        total_exposure = sum(
-            p.size * p.avg_entry_price for p in positions
-        )
-        equity = balance + total_exposure
-        exposure_pct = float(
-            (total_exposure + trade_cost) / equity
-        ) * 100
+        if equity is None:
+            positions = await engine.get_positions()
+            total_exposure = sum(
+                p.size * p.avg_entry_price for p in positions
+            )
+            equity = balance + total_exposure
+        exposure = equity - balance + trade_cost
+        exposure_pct = float(exposure / equity) * 100 if equity > 0 else 0
         if exposure_pct > self._max_exposure_pct:
             return RiskCheckResult(
                 allowed=False,
                 reason=(
                     f"Exposure {exposure_pct:.0f}% "
-                    f"of balance (limit {self._max_exposure_pct:.0f}%)"
+                    f"of equity (limit {self._max_exposure_pct:.0f}%)"
                 ),
             )
 
@@ -200,9 +210,25 @@ class CircuitBreaker:
 
     Conditions:
         - 3 consecutive round losses -> skip next round
-        - Daily loss > 20% of day-start balance -> stop for day
-        - Total drawdown > 40% from all-time high -> kill switch
+        - Daily loss > daily_loss_limit_pct of day-start balance -> stop for day
+        - Total drawdown > dynamic threshold from ATH -> kill switch (24h pause)
+
+    Dynamic drawdown: at small balances (<$500) a single loss with full
+    allocation can wipe 50% equity. Drawdown limit scales with balance
+    so the bot survives early variance but tightens as capital grows:
+        <$500:  70%    (survive Phase 1 variance)
+        $500-1k: 60%
+        $1k-5k:  50%
+        $5k+:    40%   (protect real capital)
     """
+
+    # (min_balance, drawdown_pct) — checked top-down
+    DRAWDOWN_TIERS: list[tuple[Decimal, float]] = [
+        (Decimal("5000"), 40.0),
+        (Decimal("1000"), 50.0),
+        (Decimal("500"), 60.0),
+        (Decimal("0"), 70.0),
+    ]
 
     def __init__(
         self,
@@ -210,10 +236,12 @@ class CircuitBreaker:
         daily_loss_limit_pct: float = 20.0,
         max_drawdown_pct: float = 40.0,
         state_file: Path | None = DEFAULT_BREAKER_FILE,
+        dynamic_drawdown: bool = False,
     ) -> None:
         self._max_consecutive_losses = max_consecutive_losses
         self._daily_loss_limit_pct = daily_loss_limit_pct
         self._max_drawdown_pct = max_drawdown_pct
+        self._dynamic_drawdown = dynamic_drawdown
         self._state_file = state_file
 
         self._consecutive_losses = 0
@@ -317,6 +345,19 @@ class CircuitBreaker:
                 )
         self._save_state()
 
+    def _effective_drawdown_pct(self, balance: Decimal) -> float:
+        """Return the drawdown limit for the current balance tier.
+
+        When dynamic_drawdown is enabled, smaller balances get a wider
+        limit so the bot survives early Phase-1 variance.
+        """
+        if not self._dynamic_drawdown:
+            return self._max_drawdown_pct
+        for threshold, pct in self.DRAWDOWN_TIERS:
+            if balance >= threshold:
+                return pct
+        return self._max_drawdown_pct
+
     def check(self, current_balance: Decimal) -> None:
         """Check circuit breaker conditions. Raises KillSwitchTriggered for drawdown.
 
@@ -339,15 +380,16 @@ class CircuitBreaker:
                     daily_loss_pct, self._daily_loss_limit_pct,
                 )
 
-        # Total drawdown check
+        # Total drawdown check — limit scales with balance when dynamic
         if self._all_time_high > 0:
             drawdown_pct = (
                 (self._all_time_high - current_balance) / self._all_time_high
             ) * 100
-            if drawdown_pct >= self._max_drawdown_pct:
+            limit = self._effective_drawdown_pct(current_balance)
+            if drawdown_pct >= limit:
                 raise KillSwitchTriggered(
                     f"Drawdown {drawdown_pct:.1f}% from ATH ${self._all_time_high} "
-                    f"exceeds {self._max_drawdown_pct}% limit"
+                    f"exceeds {limit:.0f}% limit (balance ${current_balance:.2f})"
                 )
 
     @property

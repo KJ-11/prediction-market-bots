@@ -356,6 +356,16 @@ class WhaleDetector:
 
         state.signal_emitted = True
 
+        # VWAP of whale trades on consensus side
+        consensus_trades = [t for t in recent if t.taker_side == side]
+        consensus_notional = sum(t.notional for t in consensus_trades)
+        consensus_size = sum(t.size for t in consensus_trades)
+        whale_vwap = (
+            consensus_notional / consensus_size
+            if consensus_size > 0
+            else entry_price
+        )
+
         signal = WhaleSignal(
             market_ticker=state.market_ticker,
             side=side,
@@ -364,6 +374,7 @@ class WhaleDetector:
             total_volume=total_vol,
             best_ask=entry_price,
             confidence=consensus,
+            whale_avg_price=whale_vwap,
         )
 
         self._tracker.log_signal_pass(

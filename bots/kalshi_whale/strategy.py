@@ -95,3 +95,4 @@ class WhaleSignal:
     total_volume: Decimal
     best_ask: Decimal  # Current ask on consensus side
     confidence: float  # Used for sizing (= consensus_pct)
+    whale_avg_price: Decimal = Decimal("0")  # VWAP of whale trades on consensus side

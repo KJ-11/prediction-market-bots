@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
+from bots.kalshi_whale.sizing import kalshi_fee as _kalshi_fee
 from bots.kalshi_whale.strategy import WhaleConfig
 from bots.kalshi_whale.tracking import WhaleTracker
 from shared.alerts.manager import AlertManager
@@ -137,13 +138,16 @@ class PositionMonitor:
                 pos = self._positions.pop(ticker)
                 won = pos.side == result
 
+                # Fee-accurate P&L
+                entry_fee = _kalshi_fee(pos.entry_price, pos.size)
                 if won:
                     payout = Decimal(str(pos.size))  # $1 per contract
-                    cost = pos.entry_price * pos.size
-                    pnl = payout - cost
+                    profit_per = Decimal("1") - pos.entry_price
+                    exit_fee = _kalshi_fee(profit_per, pos.size)
+                    pnl = payout - (pos.entry_price * pos.size) - entry_fee - exit_fee
                 else:
-                    # Lost: cost was already deducted, no payout
-                    pnl = -(pos.entry_price * pos.size)
+                    exit_fee = Decimal("0")
+                    pnl = -(pos.entry_price * pos.size) - entry_fee
 
                 logger.info(
                     "SETTLED (%s): %s %s pnl=$%+.2f",
@@ -156,6 +160,7 @@ class PositionMonitor:
                     await self._engine.settle_market(ticker, winning)
 
                 balance = await self._engine.get_balance()
+                equity = balance + self.open_cost
 
                 self._tracker.log_settlement(
                     market_ticker=ticker,
@@ -167,18 +172,18 @@ class PositionMonitor:
                     balance_after=balance,
                 )
 
-                entry_cost = pos.entry_price * pos.size
-                icon = "\u2705 WIN" if won else "\u274c LOSS"
-                await self._alerts._send(
-                    "SETTLED",
-                    "\u2696\ufe0f",
-                    (
-                        f"<b>{ticker}</b>: {icon}\n"
-                        f"Entry: ${pos.entry_price} x{pos.size} "
-                        f"(cost ${entry_cost:.2f})\n"
-                        f"P&L: <b>${pnl:+.2f}</b> | "
-                        f"Balance: <b>${balance:.2f}</b>"
-                    ),
+                await self._alerts.whale_settled(
+                    ticker=ticker,
+                    side=pos.side,
+                    outcome=result,
+                    won=won,
+                    entry_price=pos.entry_price,
+                    size=pos.size,
+                    pnl=pnl,
+                    entry_fee=entry_fee,
+                    exit_fee=exit_fee,
+                    balance=balance,
+                    equity=equity,
                 )
 
                 await self._results.put((ticker, pnl))

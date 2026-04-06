@@ -91,7 +91,6 @@ async def _signal_consumer(
     watchlist: Watchlist,
     runner: BotRunner,
     daily_stats: dict,
-    bal: dict,
 ) -> None:
     """Consume whale signals, apply sizing + risk checks, enter positions."""
     # Track entered event_tickers to avoid betting both sides of the same game
@@ -129,36 +128,28 @@ async def _signal_consumer(
             )
             continue
 
-        # Use local balance (tracks entry costs / settlement payouts)
-        # to avoid Kalshi API settlement lag.
-        # Equity = cash + open position costs (money locked in positions).
-        # Use equity for risk checks so 2 full slots don't look like a drawdown.
-        balance: Decimal = bal["balance"]
-        equity: Decimal = balance + monitor.open_cost
+        # Fetch live balance and compute equity from API every time
+        balance = await engine.get_balance()
+        equity = balance + monitor.open_cost
 
-        # Kill switch — file-based + error-based only (no permanent capital kill).
-        # The 93% WR is self-correcting; permanent death from early variance
-        # is worse than any drawdown.
+        # Kill switch — file-based + error-based only
         try:
-            kill_switch.check()  # No balance arg → skip capital loss check
+            kill_switch.check()
         except KillSwitchTriggered as e:
             logger.warning("KILL SWITCH: %s", e)
             await alerts.kill_switch_triggered(str(e))
             continue
 
-        # Circuit breaker — checks equity for daily loss + drawdown.
-        # 40% drawdown → pause (not permanent kill). Resets after 24h.
+        # Circuit breaker — checks equity for daily loss + drawdown
         try:
             breaker.check(equity)
         except KillSwitchTriggered as e:
             logger.warning("DRAWDOWN PAUSE: %s — pausing 24h", e)
             await alerts.kill_switch_triggered(f"24h pause: {e}")
-            # Sleep 24h instead of exiting, then reset and continue
             await asyncio.sleep(86400)
-            api_bal = await engine.get_balance()
-            bal["balance"] = api_bal
-            breaker.reset_ath(api_bal + monitor.open_cost)
-            breaker.set_day_start_balance(api_bal + monitor.open_cost)
+            new_bal = await engine.get_balance()
+            breaker.reset_ath(new_bal + monitor.open_cost)
+            breaker.set_day_start_balance(new_bal + monitor.open_cost)
             continue
 
         if breaker.stopped_for_day:
@@ -170,16 +161,18 @@ async def _signal_consumer(
             breaker.clear_skip()
             continue
 
-        # Compute position size — divide balance by available slots so we
-        # always reserve capacity for concurrent positions.
+        # Compute position size from live balance
         open_slots = config.max_concurrent - monitor.open_count
-        sizing_balance = balance / Decimal(str(open_slots)) if open_slots > 0 else balance
-        size = compute_size(signal.best_ask, sizing_balance)
+        slot_balance = balance / Decimal(str(open_slots)) if open_slots > 0 else balance
+        size = compute_size(signal.best_ask, slot_balance)
         if size <= 0:
-            logger.info("Signal skipped: computed size = 0 (bal=$%.2f, slot_bal=$%.2f)", balance, sizing_balance)
+            logger.info(
+                "Signal skipped: size=0 (bal=$%.2f, slot=$%.2f)",
+                balance, slot_balance,
+            )
             continue
 
-        # Risk check
+        # Risk check (also fetches live balance internally)
         outcome = Outcome.YES if signal.side == "yes" else Outcome.NO
         order = OrderRequest(
             market_id=signal.market_ticker,
@@ -189,7 +182,9 @@ async def _signal_consumer(
             size=Decimal(str(size)),
         )
 
-        risk_result = await risk.check(order, engine)
+        risk_result = await risk.check(
+            order, engine, balance=balance, equity=equity,
+        )
         if not risk_result.allowed:
             logger.info("Signal rejected by risk: %s", risk_result.reason)
             continue
@@ -198,19 +193,6 @@ async def _signal_consumer(
         logger.info(
             "ENTERING: %s %s @ %.2f x%d (bal=$%.2f)",
             signal.market_ticker, signal.side, signal.best_ask, size, balance,
-        )
-
-        await alerts._send(
-            "WHALE SIGNAL",
-            "\U0001f433",
-            (
-                f"<b>{signal.market_ticker}</b>\n"
-                f"Side: {signal.side.upper()} | "
-                f"Whales: {signal.whale_count} | "
-                f"Consensus: {signal.consensus_pct:.0%}\n"
-                f"Entry: <b>${signal.best_ask}</b> x{size} | "
-                f"Volume: ${signal.total_volume:.0f}"
-            ),
         )
 
         try:
@@ -240,16 +222,23 @@ async def _signal_consumer(
             )
             continue
 
-        # Entry filled — start monitoring
+        # Entry filled — fetch real balance post-fill
         fill_price = resp.avg_fill_price or signal.best_ask
         filled_size = int(resp.filled_size)
-
         entry_fee = kalshi_fee(fill_price, filled_size)
-        cost = fill_price * filled_size + entry_fee
+        cost = fill_price * filled_size
 
-        # Deduct cost from local balance immediately (don't wait for API)
-        bal["balance"] -= cost
-        balance = bal["balance"]
+        # Track position before fetching balance so open_cost is current
+        monitor.add_position(TrackedPosition(
+            market_ticker=signal.market_ticker,
+            side=signal.side,
+            entry_price=fill_price,
+            size=filled_size,
+            order_id=resp.order_id,
+        ))
+
+        balance = await engine.get_balance()
+        equity = balance + monitor.open_cost
 
         tracker.log_entry(
             market_ticker=signal.market_ticker,
@@ -263,32 +252,29 @@ async def _signal_consumer(
             balance_after=balance,
         )
 
-        await alerts.trade_filled(
-            coin=signal.market_ticker,
-            side="BUY",
-            outcome=signal.side.upper(),
+        await alerts.whale_entry(
+            ticker=signal.market_ticker,
+            side=signal.side,
             price=fill_price,
             size=filled_size,
             cost=cost,
+            fee=entry_fee,
+            whale_count=signal.whale_count,
+            consensus_pct=signal.consensus_pct,
             balance=balance,
+            equity=equity,
+            whale_avg_price=signal.whale_avg_price,
+            signal_ask=signal.best_ask,
         )
-
-        monitor.add_position(TrackedPosition(
-            market_ticker=signal.market_ticker,
-            side=signal.side,
-            entry_price=fill_price,
-            size=filled_size,
-            order_id=resp.order_id,
-        ))
 
         daily_stats["trades"] += 1
         if event_ticker:
             entered_events.add(event_ticker)
 
         logger.info(
-            "ENTERED: %s %s @ %.2f x%d bal=$%.2f",
+            "ENTERED: %s %s @ %.2f x%d bal=$%.2f eq=$%.2f",
             signal.market_ticker, signal.side, fill_price, filled_size,
-            balance,
+            balance, equity,
         )
 
 
@@ -297,10 +283,9 @@ async def _results_consumer(
     breaker: CircuitBreaker,
     engine,
     daily_stats: dict,
-    bal: dict,
     runner: BotRunner,
 ) -> None:
-    """Consume position results (settlements/stop losses) and update breaker."""
+    """Consume position results (settlements) and update breaker."""
     while not runner.shutdown_requested:
         try:
             ticker, pnl = await asyncio.wait_for(
@@ -309,16 +294,7 @@ async def _results_consumer(
         except asyncio.TimeoutError:
             continue
 
-        # Credit pnl to local balance (settlement payout or stop loss proceeds).
-        # For wins: pnl = payout - cost, but cost was already deducted on entry.
-        # The actual credit is cost + pnl = payout.
-        # For stop losses: pnl is negative, but we get sell proceeds back.
-        # The monitor already computed pnl = (fill_price - entry_price) * size - exit_fee.
-        # We need to credit back: entry_cost + pnl (which = sell_proceeds - exit_fee).
-        # Simpler: just sync from the engine since settlement is done by now.
-        api_balance = await engine.get_balance()
-        bal["balance"] = api_balance
-        balance = api_balance
+        balance = await engine.get_balance()
 
         won = pnl > 0
         breaker.record_round_result(won=won, current_balance=balance)
@@ -411,11 +387,12 @@ async def run_bot(
         max_orders_per_min=settings.max_orders_per_min,
     )
 
-    # Circuit breaker
+    # Circuit breaker — dynamic drawdown scales with balance tier
     breaker = CircuitBreaker(
         max_consecutive_losses=3,
-        daily_loss_limit_pct=50.0 if settings.paper_trading else 20.0,
-        max_drawdown_pct=60.0 if settings.paper_trading else 40.0,
+        daily_loss_limit_pct=50.0 if settings.paper_trading else 30.0,
+        max_drawdown_pct=60.0 if settings.paper_trading else 70.0,
+        dynamic_drawdown=not settings.paper_trading,
     )
     breaker.set_day_start_balance(initial_balance)
 
@@ -433,10 +410,6 @@ async def run_bot(
         "pnl": Decimal("0"),
         "signals": 0,
     }
-
-    # Local balance tracking — avoids Kalshi API settlement lag.
-    # Deducted on entry, synced from API on settlement/stop loss.
-    bal = {"balance": initial_balance}
 
     # Components
     detector = WhaleDetector(
@@ -478,7 +451,7 @@ async def run_bot(
         asyncio.create_task(
             _signal_consumer(
                 signal_queue, config, engine, kill_switch, risk, breaker,
-                monitor, tracker, alerts, watchlist, runner, daily_stats, bal,
+                monitor, tracker, alerts, watchlist, runner, daily_stats,
             ),
             name="signal-consumer",
         ),
@@ -491,7 +464,7 @@ async def run_bot(
             name="settlement-poller",
         ),
         asyncio.create_task(
-            _results_consumer(monitor, breaker, engine, daily_stats, bal, runner),
+            _results_consumer(monitor, breaker, engine, daily_stats, runner),
             name="results-consumer",
         ),
         asyncio.create_task(

@@ -1,14 +1,15 @@
 services:
-  bot:
-    build: .
-    image: prediction-market-bots
-    command: python -m bots.kalshi_crypto.main --series all
-    restart: always
-    env_file: .env
-    environment:
-      - TZ=America/Chicago
-    volumes:
-      - ./data:/app/data
+  # Crypto bot disabled — data collection only, no active trading.
+  # bot:
+  #   build: .
+  #   image: prediction-market-bots
+  #   command: python -m bots.kalshi_crypto.main --series all
+  #   restart: always
+  #   env_file: .env
+  #   environment:
+  #     - TZ=America/Chicago
+  #   volumes:
+  #     - ./data:/app/data
 
   whale:
     build: .
