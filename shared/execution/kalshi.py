@@ -41,20 +41,45 @@ def _map_kalshi_status(status: str) -> OrderStatus:
     return mapping.get(status, OrderStatus.PENDING)
 
 
+def _get_fill_count(result: dict) -> int:
+    """Extract fill count from Kalshi response.
+
+    Kalshi API returns fill_count_fp (current) or fill_count (legacy).
+    """
+    count = result.get("fill_count_fp") or result.get("fill_count") or 0
+    return int(count)
+
+
 def _compute_fill_price(result: dict, outcome: str) -> Decimal | None:
     """Compute average fill price from Kalshi response fields.
 
-    Kalshi returns taker_fill_cost (cents) and fill_count.
-    avg_fill_price = taker_fill_cost / fill_count / 100 (convert cents to dollars).
-
-    For NO orders, Kalshi reports cost from the YES perspective,
-    so we use: no_fill_price = 1 - (taker_fill_cost / fill_count / 100).
+    Kalshi API returns dollar-denominated fields (current) or cent fields
+    (legacy). Handles both:
+        taker_fill_cost_dollars / fill_count_fp  (dollars, no conversion)
+        taker_fill_cost / fill_count / 100       (cents, convert to dollars)
     """
-    fill_count = result.get("fill_count", 0)
-    taker_fill_cost = result.get("taker_fill_cost", 0)
-    if not fill_count or not taker_fill_cost:
+    fill_count = _get_fill_count(result)
+    if not fill_count:
         return None
-    yes_fill = Decimal(str(taker_fill_cost)) / Decimal(str(fill_count)) / Decimal("100")
+
+    # Prefer dollar-denominated fields (current API)
+    cost_dollars = result.get("taker_fill_cost_dollars")
+    if cost_dollars is not None:
+        cost_dec = Decimal(str(cost_dollars))
+        if cost_dec == 0:
+            return None
+        yes_fill = cost_dec / Decimal(str(fill_count))
+    else:
+        # Legacy cent-denominated fields
+        taker_fill_cost = result.get("taker_fill_cost", 0)
+        if not taker_fill_cost:
+            return None
+        yes_fill = (
+            Decimal(str(taker_fill_cost))
+            / Decimal(str(fill_count))
+            / Decimal("100")
+        )
+
     if outcome == "no":
         return Decimal("1") - yes_fill
     return yes_fill
@@ -119,15 +144,19 @@ class KalshiExecutionEngine(AbstractExecutionEngine):
         try:
             result = await self._client.place_order(kalshi_order)
             status = _map_kalshi_status(result.get("status", ""))
-            fill_count = result.get("fill_count", 0)
+            fill_count = _get_fill_count(result)
             fill_price = _compute_fill_price(result, order.outcome.value)
-            taker_fees = result.get("taker_fees", 0)
+            taker_fees = (
+                result.get("taker_fees_dollars")
+                or result.get("taker_fees")
+                or 0
+            )
 
             logger.info(
-                "Kalshi: order response status=%s fill_count=%s "
-                "fill_price=%s fees=%sc raw_keys=%s",
+                "Kalshi: order response status=%s fills=%d "
+                "price=%s fees=%s",
                 result.get("status"), fill_count,
-                fill_price, taker_fees, list(result.keys()),
+                fill_price, taker_fees,
             )
 
             return OrderResponse(
@@ -138,7 +167,7 @@ class KalshiExecutionEngine(AbstractExecutionEngine):
                 outcome=order.outcome,
                 price=order.price,
                 size=order.size,
-                filled_size=Decimal(str(fill_count)) if fill_count else Decimal("0"),
+                filled_size=Decimal(str(fill_count)),
                 avg_fill_price=fill_price,
                 raw=result,
             )

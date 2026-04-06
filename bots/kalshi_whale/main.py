@@ -222,13 +222,13 @@ async def _signal_consumer(
             )
             continue
 
-        # Entry filled — check we actually got contracts
+        # Entry filled
         fill_price = resp.avg_fill_price or signal.best_ask
         filled_size = int(resp.filled_size)
 
         if filled_size <= 0:
             logger.warning(
-                "IOC executed but 0 fills: %s (ask moved?)",
+                "IOC executed but 0 fills: %s — no liquidity at price",
                 signal.market_ticker,
             )
             continue
