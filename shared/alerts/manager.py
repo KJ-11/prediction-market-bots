@@ -267,6 +267,33 @@ class AlertManager:
         )
         return await self._send(f"SETTLED — {result}", "\u2696\ufe0f", body)
 
+    async def whale_stop_loss(
+        self,
+        ticker: str,
+        side: str,
+        entry_price: Decimal,
+        exit_price: Decimal,
+        stop_threshold: Decimal,
+        trigger_bid: Decimal,
+        size: int,
+        pnl: Decimal,
+        entry_fee: Decimal,
+        exit_fee: Decimal,
+        balance: Decimal,
+        equity: Decimal,
+    ) -> bool:
+        """Stop-loss exit alert with trigger details."""
+        short = _short_ticker(ticker)
+        body = (
+            f"\U0001f6d1 <b>{short}</b> {side.upper()} STOPPED\n"
+            f"Entry: ${entry_price:.2f} \u2192 Exit: ${exit_price:.2f} x{size}\n"
+            f"Stop: ${stop_threshold:.2f} | Trigger: ${trigger_bid:.2f}\n"
+            f"P&L: <b>${pnl:+.2f}</b>\n"
+            f"Fees: ${entry_fee:.2f} + ${exit_fee:.2f}\n"
+            f"Bal: ${balance:.2f} | Equity: ${equity:.2f}"
+        )
+        return await self._send("STOP LOSS", "\U0001f6d1", body)
+
     # ---- Legacy trade_filled (for crypto bot) -------------------------
 
     async def trade_filled(

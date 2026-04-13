@@ -21,6 +21,7 @@ class WhaleConfig:
     whale_window_min: int = 30  # All whale trades must be within this window
     categories: tuple[str, ...] = ("sports", "economics")
     max_concurrent: int = 2  # Max open positions at once
+    stop_loss_pct: float = 0.15  # Exit when bid drops 15% below entry
 
 
 @dataclass

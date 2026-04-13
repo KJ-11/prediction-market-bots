@@ -13,7 +13,6 @@ from bots.kalshi_whale.discovery import Watchlist, WatchlistMarket, parse_ticker
 from bots.kalshi_whale.monitor import PositionMonitor, TrackedPosition
 from bots.kalshi_whale.signal import WhaleDetector
 from bots.kalshi_whale.sizing import compute_size, kalshi_fee
-from shared.execution.kalshi import _compute_fill_price, _get_fill_count
 from bots.kalshi_whale.strategy import (
     MarketWhaleState,
     WhaleConfig,
@@ -21,8 +20,9 @@ from bots.kalshi_whale.strategy import (
     WhaleTrade,
 )
 from bots.kalshi_whale.tracking import WhaleTracker
-from shared.types import Outcome, PriceUpdate
-
+from shared.execution.kalshi import _compute_fill_price
+from shared.execution.paper import PaperExecutionEngine
+from shared.types import OrderRequest, Outcome, PriceUpdate, Side
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -635,3 +635,527 @@ class TestComputeFillPrice:
 
     def test_no_fields(self):
         assert _compute_fill_price({}) is None
+
+
+# ── Stop-loss tests ─────────────────────────────────────────────────
+
+def _make_monitor(config=None, engine=None):
+    """Create a PositionMonitor with mocked dependencies for testing."""
+    config = config or WhaleConfig(stop_loss_pct=0.15)
+    engine = engine or PaperExecutionEngine(
+        initial_balance=Decimal("300"), balance_file=None,
+    )
+    client = AsyncMock()
+    alerts = AsyncMock()
+    tracker = MagicMock(spec=WhaleTracker)
+    tracker.log_stop_loss = MagicMock()
+    tracker.log_settlement = MagicMock()
+    price_queue = asyncio.Queue()
+    on_stop_loss = AsyncMock()
+
+    monitor = PositionMonitor(
+        config=config,
+        engine=engine,
+        client=client,
+        alerts=alerts,
+        tracker=tracker,
+        price_queue=price_queue,
+        on_stop_loss=on_stop_loss,
+    )
+    return monitor, engine, alerts, tracker, price_queue, on_stop_loss
+
+
+async def _seed_position(monitor, engine, ticker="KXTEST-YES", side="yes",
+                         entry_price=Decimal("0.90"), size=100):
+    """Add a position to both monitor and paper engine."""
+    outcome = Outcome.YES if side == "yes" else Outcome.NO
+    monitor.add_position(TrackedPosition(
+        market_ticker=ticker, side=side,
+        entry_price=entry_price, size=size, order_id="test-order",
+    ))
+    await engine.place_order(OrderRequest(
+        market_id=ticker, side=Side.BUY, outcome=outcome,
+        price=entry_price, size=Decimal(str(size)),
+    ))
+
+
+class TestStopLossThreshold:
+    """Stop-loss threshold calculation."""
+
+    @pytest.mark.asyncio
+    async def test_threshold_calculation(self):
+        """Stop threshold is entry * (1 - stop_loss_pct)."""
+        monitor, *_ = _make_monitor()
+        pos = TrackedPosition(
+            market_ticker="TEST", side="yes",
+            entry_price=Decimal("0.90"), size=100,
+        )
+        assert monitor._stop_threshold(pos) == Decimal("0.765")
+
+    @pytest.mark.asyncio
+    async def test_threshold_custom_pct(self):
+        """Custom stop_loss_pct is respected."""
+        config = WhaleConfig(stop_loss_pct=0.10)
+        monitor, *_ = _make_monitor(config=config)
+        pos = TrackedPosition(
+            market_ticker="TEST", side="yes",
+            entry_price=Decimal("0.80"), size=50,
+        )
+        # 0.80 * (1 - 0.10) = 0.72
+        assert monitor._stop_threshold(pos) == Decimal("0.72")
+
+
+class TestStopLossDirectExecution:
+    """Direct _execute_stop_loss calls — unit tests."""
+
+    @pytest.mark.asyncio
+    async def test_triggers_on_bid_drop(self):
+        """Bid below threshold triggers sell, removes position, fires callbacks."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(monitor, engine)
+
+        await monitor._execute_stop_loss(
+            monitor._positions["KXTEST-YES"], trigger_bid=Decimal("0.75"),
+        )
+
+        assert monitor.open_count == 0
+        assert not monitor.results.empty()
+        ticker_result, pnl = await monitor.results.get()
+        assert ticker_result == "KXTEST-YES"
+        assert pnl < 0
+        tracker.log_stop_loss.assert_called_once()
+        alerts.whale_stop_loss.assert_awaited_once()
+        on_stop_loss.assert_awaited_once_with("KXTEST-YES")
+
+    @pytest.mark.asyncio
+    async def test_pnl_accuracy(self):
+        """P&L is computed correctly: (exit - entry) * size - fees."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        entry = Decimal("0.90")
+        size = 100
+        await _seed_position(monitor, engine, entry_price=entry, size=size)
+
+        trigger = Decimal("0.75")
+        await monitor._execute_stop_loss(
+            monitor._positions["KXTEST-YES"], trigger_bid=trigger,
+        )
+
+        _, pnl = await monitor.results.get()
+        # Paper engine fills at trigger minus slippage (10bps = 0.001).
+        # Fill price ≈ 0.749. P&L = (0.749 - 0.90) * 100 - entry_fee - exit_fee.
+        # Just verify it's in the right ballpark: roughly -$15 ± fees.
+        assert Decimal("-20") < pnl < Decimal("-10")
+
+    @pytest.mark.asyncio
+    async def test_hard_floor_prevents_sell(self):
+        """Bid at or below $0.05 does NOT trigger sell."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(monitor, engine)
+
+        await monitor._execute_stop_loss(
+            monitor._positions["KXTEST-YES"], trigger_bid=Decimal("0.03"),
+        )
+
+        assert monitor.open_count == 1
+        tracker.log_stop_loss.assert_not_called()
+        assert monitor.results.empty()
+
+    @pytest.mark.asyncio
+    async def test_hard_floor_boundary(self):
+        """Bid at exactly $0.05 does NOT trigger sell."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(monitor, engine)
+
+        await monitor._execute_stop_loss(
+            monitor._positions["KXTEST-YES"], trigger_bid=Decimal("0.05"),
+        )
+
+        assert monitor.open_count == 1
+
+    @pytest.mark.asyncio
+    async def test_no_side_uses_no_bid(self):
+        """NO-side position triggers on no_bid, not yes_bid."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(
+            monitor, engine, ticker="KXTEST-NO", side="no",
+            entry_price=Decimal("0.90"), size=50,
+        )
+
+        await monitor._execute_stop_loss(
+            monitor._positions["KXTEST-NO"], trigger_bid=Decimal("0.70"),
+        )
+        assert monitor.open_count == 0
+        on_stop_loss.assert_awaited_once_with("KXTEST-NO")
+
+    @pytest.mark.asyncio
+    async def test_race_condition_double_process(self):
+        """If stop-loss already removed position, second call is a no-op."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(monitor, engine)
+
+        pos = monitor._positions["KXTEST-YES"]
+        await monitor._execute_stop_loss(pos, trigger_bid=Decimal("0.70"))
+        assert monitor.open_count == 0
+
+        # Second call with same pos — should be a no-op.
+        await monitor._execute_stop_loss(pos, trigger_bid=Decimal("0.70"))
+        # Still only one result on queue, one callback.
+        assert monitor.results.qsize() == 1
+        on_stop_loss.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_partial_fill(self):
+        """Partial fill reduces position size but keeps it open."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+
+        # Use a mock engine that returns partial fills.
+        mock_engine = AsyncMock()
+        mock_engine.place_order.return_value = MagicMock(
+            filled_size=Decimal("60"), avg_fill_price=Decimal("0.74"),
+            order_id="partial-order", status=MagicMock(value="filled"),
+        )
+        mock_engine.get_balance.return_value = Decimal("200")
+        mock_engine.get_positions.return_value = []
+        monitor._engine = mock_engine
+
+        monitor.add_position(TrackedPosition(
+            market_ticker="KXTEST-PARTIAL", side="yes",
+            entry_price=Decimal("0.90"), size=100, order_id="test",
+        ))
+
+        await monitor._execute_stop_loss(
+            monitor._positions["KXTEST-PARTIAL"], trigger_bid=Decimal("0.74"),
+        )
+
+        # Position should still exist with reduced size.
+        assert monitor.open_count == 1
+        assert monitor._positions["KXTEST-PARTIAL"].size == 40
+        # Result pushed (for the filled portion).
+        assert not monitor.results.empty()
+        # Callback NOT fired (not fully exited).
+        on_stop_loss.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_fills_retries(self):
+        """Zero fills on sell does NOT remove position — retries next tick."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+
+        mock_engine = AsyncMock()
+        mock_engine.place_order.return_value = MagicMock(
+            filled_size=Decimal("0"), avg_fill_price=None,
+            order_id="no-fill", status=MagicMock(value="cancelled"),
+        )
+        monitor._engine = mock_engine
+
+        monitor.add_position(TrackedPosition(
+            market_ticker="KXTEST-NOFILL", side="yes",
+            entry_price=Decimal("0.90"), size=100, order_id="test",
+        ))
+
+        await monitor._execute_stop_loss(
+            monitor._positions["KXTEST-NOFILL"], trigger_bid=Decimal("0.70"),
+        )
+
+        # Position still open — will retry on next price tick.
+        assert monitor.open_count == 1
+        assert monitor.results.empty()
+        tracker.log_stop_loss.assert_not_called()
+
+
+class TestStopLossLoop:
+    """End-to-end: run_price_monitor loop processes queue and triggers stops.
+
+    Uses asyncio.run() wrapper to avoid pytest-asyncio event loop issues
+    with create_task in older versions.
+    """
+
+    def _run(self, coro):
+        """Run an async test in a fresh event loop."""
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    @pytest.mark.asyncio
+    async def test_loop_triggers_stop_on_low_bid(self):
+        """run_price_monitor processes PriceUpdates and fires stop loss."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(monitor, engine)
+
+        async def _run_loop():
+            # Feed a sequence: safe bid, then dangerous bid.
+            await queue.put(PriceUpdate(
+                market_id="KXTEST-YES", yes_bid=Decimal("0.85"),
+            ))
+            await queue.put(PriceUpdate(
+                market_id="KXTEST-YES", yes_bid=Decimal("0.75"),
+            ))
+
+            task = asyncio.ensure_future(monitor.run_price_monitor())
+            try:
+                return await asyncio.wait_for(
+                    monitor.results.get(), timeout=3.0,
+                )
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        ticker_result, pnl = await _run_loop()
+
+        assert ticker_result == "KXTEST-YES"
+        assert pnl < 0
+        assert monitor.open_count == 0
+        tracker.log_stop_loss.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_loop_ignores_safe_bids(self):
+        """Bids above threshold are processed but don't trigger stop."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(monitor, engine)
+
+        # All bids above stop threshold of $0.765.
+        for bid in ["0.85", "0.80", "0.77"]:
+            await queue.put(PriceUpdate(
+                market_id="KXTEST-YES", yes_bid=Decimal(bid),
+            ))
+
+        async def _drain():
+            task = asyncio.ensure_future(monitor.run_price_monitor())
+            # Wait until queue is drained.
+            while not queue.empty():
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)  # Let last iteration finish.
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        await _drain()
+
+        assert monitor.open_count == 1
+        assert monitor.results.empty()
+        tracker.log_stop_loss.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_loop_ignores_untracked_tickers(self):
+        """Price updates for markets we don't hold are ignored."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(monitor, engine)
+
+        await queue.put(PriceUpdate(
+            market_id="KXOTHER-YES", yes_bid=Decimal("0.10"),
+        ))
+
+        async def _drain():
+            task = asyncio.ensure_future(monitor.run_price_monitor())
+            while not queue.empty():
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        await _drain()
+
+        assert monitor.open_count == 1
+        tracker.log_stop_loss.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_loop_no_side_position(self):
+        """Loop correctly uses no_bid for NO-side positions."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(
+            monitor, engine, ticker="KXTEST-NO", side="no",
+            entry_price=Decimal("0.90"), size=50,
+        )
+
+        await queue.put(PriceUpdate(
+            market_id="KXTEST-NO", yes_bid=Decimal("0.10"),
+            no_bid=Decimal("0.70"),
+        ))
+
+        async def _run_loop():
+            task = asyncio.ensure_future(monitor.run_price_monitor())
+            try:
+                return await asyncio.wait_for(
+                    monitor.results.get(), timeout=3.0,
+                )
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        ticker_result, pnl = await _run_loop()
+
+        assert ticker_result == "KXTEST-NO"
+        assert monitor.open_count == 0
+
+
+class TestStopLossRESTFallback:
+    """REST fallback for stale WS prices."""
+
+    @pytest.mark.asyncio
+    async def test_rest_fallback_triggers_stop(self):
+        """If WS is stale, REST fetch triggers stop-loss."""
+        import time as _time
+
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(monitor, engine)
+
+        # Fake the last price time to be old (>60s ago).
+        monitor._last_price_time["KXTEST-YES"] = _time.monotonic() - 120.0
+
+        # Mock the client to return a low bid.
+        monitor._client.fetch_market.return_value = {
+            "yes_bid_dollars": "0.70",
+            "result": "",
+        }
+
+        await monitor._check_stale_prices()
+
+        assert monitor.open_count == 0
+        assert not monitor.results.empty()
+        _, pnl = await monitor.results.get()
+        assert pnl < 0
+
+    @pytest.mark.asyncio
+    async def test_rest_fallback_skips_fresh(self):
+        """REST fallback does NOT fire if WS data is fresh."""
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(monitor, engine)
+
+        # last_price_time is fresh (set by add_position).
+        monitor._client.fetch_market.return_value = {
+            "yes_bid_dollars": "0.70",
+        }
+
+        await monitor._check_stale_prices()
+
+        # Position should still be open — WS data was fresh, REST not triggered.
+        assert monitor.open_count == 1
+        monitor._client.fetch_market.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rest_fallback_safe_bid(self):
+        """REST fallback fetches but bid is above threshold — no stop."""
+        import time as _time
+
+        monitor, engine, alerts, tracker, queue, on_stop_loss = _make_monitor()
+        await _seed_position(monitor, engine)
+
+        monitor._last_price_time["KXTEST-YES"] = _time.monotonic() - 120.0
+
+        monitor._client.fetch_market.return_value = {
+            "yes_bid_dollars": "0.85",
+            "result": "",
+        }
+
+        await monitor._check_stale_prices()
+
+        assert monitor.open_count == 1
+        assert monitor.results.empty()
+
+
+class TestStopLossPaperDryRun:
+    """Paper trading integration: buy → stop loss → verify balance."""
+
+    @pytest.mark.asyncio
+    async def test_full_cycle_buy_then_stop(self):
+        """Buy 100 YES at $0.90, stop at $0.75 — verify balance."""
+        engine = PaperExecutionEngine(
+            initial_balance=Decimal("300"), balance_file=None,
+        )
+        monitor, _, alerts, tracker, queue, on_stop_loss = _make_monitor(
+            engine=engine,
+        )
+
+        entry_price = Decimal("0.90")
+        size = 100
+        buy_resp = await engine.place_order(OrderRequest(
+            market_id="GAME-A", side=Side.BUY, outcome=Outcome.YES,
+            price=entry_price, size=Decimal(str(size)),
+        ))
+        balance_after_buy = await engine.get_balance()
+        assert balance_after_buy < Decimal("300")
+
+        monitor.add_position(TrackedPosition(
+            market_ticker="GAME-A", side="yes",
+            entry_price=entry_price, size=size,
+            order_id=buy_resp.order_id,
+        ))
+
+        # Stop loss at $0.75 via the loop.
+        await queue.put(PriceUpdate(
+            market_id="GAME-A", yes_bid=Decimal("0.75"),
+        ))
+
+        async def _run_loop():
+            task = asyncio.ensure_future(monitor.run_price_monitor())
+            try:
+                return await asyncio.wait_for(
+                    monitor.results.get(), timeout=3.0,
+                )
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        ticker_result, pnl = await _run_loop()
+
+        assert ticker_result == "GAME-A"
+        assert pnl < 0
+        assert monitor.open_count == 0
+
+        final_balance = await engine.get_balance()
+        assert final_balance > Decimal("0")
+        assert final_balance < Decimal("300")
+        # Lost roughly (0.90 - 0.75) * 100 + fees ≈ $15 + fees.
+        assert Decimal("270") < final_balance < Decimal("295")
+
+    @pytest.mark.asyncio
+    async def test_two_positions_one_stops(self):
+        """Two concurrent positions, one stops, the other stays open."""
+        engine = PaperExecutionEngine(
+            initial_balance=Decimal("300"), balance_file=None,
+        )
+        monitor, _, alerts, tracker, queue, on_stop_loss = _make_monitor(
+            engine=engine,
+        )
+
+        await engine.place_order(OrderRequest(
+            market_id="GAME-A", side=Side.BUY, outcome=Outcome.YES,
+            price=Decimal("0.90"), size=Decimal("50"),
+        ))
+        monitor.add_position(TrackedPosition(
+            market_ticker="GAME-A", side="yes",
+            entry_price=Decimal("0.90"), size=50, order_id="a",
+        ))
+
+        await engine.place_order(OrderRequest(
+            market_id="GAME-B", side=Side.BUY, outcome=Outcome.YES,
+            price=Decimal("0.85"), size=Decimal("50"),
+        ))
+        monitor.add_position(TrackedPosition(
+            market_ticker="GAME-B", side="yes",
+            entry_price=Decimal("0.85"), size=50, order_id="b",
+        ))
+
+        assert monitor.open_count == 2
+
+        # GAME-B safe bid first, then GAME-A triggers stop.
+        await queue.put(PriceUpdate(
+            market_id="GAME-B", yes_bid=Decimal("0.80"),
+        ))
+        await queue.put(PriceUpdate(
+            market_id="GAME-A", yes_bid=Decimal("0.70"),
+        ))
+
+        async def _run_loop():
+            task = asyncio.ensure_future(monitor.run_price_monitor())
+            try:
+                return await asyncio.wait_for(
+                    monitor.results.get(), timeout=3.0,
+                )
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        ticker_result, pnl = await _run_loop()
+
+        assert ticker_result == "GAME-A"
+        assert pnl < 0
+        assert monitor.open_count == 1
+        assert "GAME-B" in monitor._positions
+        assert "GAME-A" not in monitor._positions

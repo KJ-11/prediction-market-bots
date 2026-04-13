@@ -446,6 +446,10 @@ async def run_bot(
         alerts=alerts,
     )
 
+    async def _on_stop_loss(ticker: str) -> None:
+        """Clear detector state after stop-loss so fresh whales can re-trigger."""
+        detector.clear_market(ticker)
+
     monitor = PositionMonitor(
         config=config,
         engine=engine,
@@ -453,6 +457,7 @@ async def run_bot(
         alerts=alerts,
         tracker=tracker,
         price_queue=price_queue,
+        on_stop_loss=_on_stop_loss,
     )
 
     # Send startup alert
