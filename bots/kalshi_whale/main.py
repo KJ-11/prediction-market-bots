@@ -43,6 +43,24 @@ DISCOVERY_INTERVAL = 60.0  # Poll for new markets every 60s
 STATS_LOG_INTERVAL = 300.0  # Log stats every 5 min
 
 
+async def _fetch_balance_and_equity(engine) -> tuple[Decimal, Decimal]:
+    """Return (cash_balance, equity) sourced from real Kalshi positions.
+
+    Equity = cash + sum(position_size * avg_entry_price). Always sources
+    positions from engine.get_positions() rather than any in-memory cache,
+    because the bot only tracks positions opened in the current run. Positions
+    opened by an earlier run (before a restart) exist on Kalshi but would not
+    be counted, so equity would be undercounted and the daily-loss circuit
+    breaker would trip on phantom losses.
+    """
+    balance = await engine.get_balance()
+    positions = await engine.get_positions()
+    open_cost = sum(
+        (p.size * p.avg_entry_price for p in positions), Decimal("0"),
+    )
+    return balance, balance + open_cost
+
+
 async def _discovery_loop(
     client: KalshiClient,
     config: WhaleConfig,
@@ -128,9 +146,8 @@ async def _signal_consumer(
             )
             continue
 
-        # Fetch live balance and compute equity from API every time
-        balance = await engine.get_balance()
-        equity = balance + monitor.open_cost
+        # Fetch live balance + equity from real Kalshi positions every time
+        balance, equity = await _fetch_balance_and_equity(engine)
 
         # Kill switch — file-based + error-based only
         try:
@@ -147,9 +164,9 @@ async def _signal_consumer(
             logger.warning("DRAWDOWN PAUSE: %s — pausing 24h", e)
             await alerts.kill_switch_triggered(f"24h pause: {e}")
             await asyncio.sleep(86400)
-            new_bal = await engine.get_balance()
-            breaker.reset_ath(new_bal + monitor.open_cost)
-            breaker.set_day_start_balance(new_bal + monitor.open_cost)
+            _, new_equity = await _fetch_balance_and_equity(engine)
+            breaker.reset_ath(new_equity)
+            breaker.set_day_start_balance(new_equity)
             continue
 
         if breaker.stopped_for_day:
@@ -235,7 +252,6 @@ async def _signal_consumer(
         entry_fee = kalshi_fee(fill_price, filled_size)
         cost = fill_price * filled_size
 
-        # Track position before fetching balance so open_cost is current
         monitor.add_position(TrackedPosition(
             market_ticker=signal.market_ticker,
             side=signal.side,
@@ -244,8 +260,7 @@ async def _signal_consumer(
             order_id=resp.order_id,
         ))
 
-        balance = await engine.get_balance()
-        equity = balance + monitor.open_cost
+        balance, equity = await _fetch_balance_and_equity(engine)
 
         tracker.log_entry(
             market_ticker=signal.market_ticker,
@@ -374,7 +389,7 @@ async def run_bot(
         mode = "LIVE"
         logger.info("Mode: LIVE trading")
 
-    initial_balance = await engine.get_balance()
+    initial_balance, initial_equity = await _fetch_balance_and_equity(engine)
 
     # Kill switch — file-based + error-based only.
     # No capital loss kill; drawdown handled by circuit breaker with 24h pause.
@@ -401,7 +416,9 @@ async def run_bot(
         max_drawdown_pct=60.0 if settings.paper_trading else 70.0,
         dynamic_drawdown=not settings.paper_trading,
     )
-    breaker.set_day_start_balance(initial_balance)
+    # Day-start anchored to equity (cash + open positions), not cash, so that
+    # opening positions doesn't look like a daily loss in the breaker check.
+    breaker.set_day_start_balance(initial_equity)
 
     # Event tracker (CSV + structured logging)
     tracker = WhaleTracker()

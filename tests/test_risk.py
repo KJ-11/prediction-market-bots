@@ -271,6 +271,31 @@ class TestCircuitBreaker:
         cb2.set_day_start_balance(Decimal("39"))
         assert not cb2.stopped_for_day
 
+    def test_runtime_day_rollover(self, tmp_path):
+        """Breaker resets stopped_for_day at runtime when calendar day changes."""
+        import json
+
+        state_file = tmp_path / "breaker.json"
+        cb = CircuitBreaker(daily_loss_limit_pct=20.0, state_file=state_file)
+        cb.set_day_start_balance(Decimal("100"))
+        cb.check(Decimal("70"))  # 30% loss
+        assert cb.stopped_for_day
+
+        # Simulate the calendar day advancing without a restart by editing
+        # the in-memory date directly. The next check() call should detect
+        # the rollover, reset state, and re-anchor day_start_balance.
+        cb._date = "2020-01-01"
+        cb.check(Decimal("70"))
+        assert not cb.stopped_for_day
+        assert cb._day_start_balance == Decimal("70")
+
+        # And the persisted state file should reflect the rollover, so a
+        # subsequent restart loads the new day rather than the stale one.
+        state = json.loads(state_file.read_text())
+        assert state["date"] != "2020-01-01"
+        assert state["stopped_for_day"] is False
+        assert state["day_start_balance"] == "70"
+
     def test_persistence_consecutive_losses(self, tmp_path):
         """Consecutive loss count persists across restarts."""
         state_file = tmp_path / "breaker.json"

@@ -309,7 +309,6 @@ class CircuitBreaker:
 
     def set_day_start_balance(self, balance: Decimal) -> None:
         """Call at startup. Loads persisted state if same day, otherwise resets."""
-        today = self._today_cst()
         restored = self._load_state()
         if restored:
             # Same day: keep stopped_for_day and consecutive_losses from disk.
@@ -318,7 +317,11 @@ class CircuitBreaker:
                 self._all_time_high = balance
             return
         # New day or no saved state — fresh start
-        self._date = today
+        self._reset_for_new_day(balance)
+
+    def _reset_for_new_day(self, balance: Decimal) -> None:
+        """Fresh-day reset: clears stopped_for_day, losses, and re-anchors day_start."""
+        self._date = self._today_cst()
         self._day_start_balance = balance
         if balance > self._all_time_high:
             self._all_time_high = balance
@@ -363,6 +366,17 @@ class CircuitBreaker:
 
         For daily loss, sets stopped_for_day flag.
         """
+        # Day rollover: if the calendar day has advanced since the last reset,
+        # re-anchor day_start_balance and clear the stopped_for_day flag so the
+        # bot resumes trading on a new day without needing a restart.
+        today = self._today_cst()
+        if self._date and today != self._date:
+            logger.info(
+                "Circuit breaker: day rollover %s -> %s, resetting daily state",
+                self._date, today,
+            )
+            self._reset_for_new_day(current_balance)
+
         # Update ATH
         if current_balance > self._all_time_high:
             self._all_time_high = current_balance

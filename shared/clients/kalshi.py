@@ -116,11 +116,19 @@ class KalshiClient:
         resp = await self._get("/portfolio/balance")
         return resp.json()
 
-    async def get_positions(self, ticker: str | None = None) -> list[dict]:
-        """Get open positions."""
+    async def get_positions(
+        self,
+        ticker: str | None = None,
+        count_filter: str | None = None,
+    ) -> list[dict]:
+        """Get positions. Pass count_filter='position' to get only non-zero
+        (i.e. currently held) market positions and skip historical/settled
+        rows that the API returns by default."""
         params: dict = {"limit": 1000}
         if ticker:
             params["ticker"] = ticker
+        if count_filter:
+            params["count_filter"] = count_filter
         resp = await self._get("/portfolio/positions", params=params)
         return resp.json().get("market_positions", [])
 

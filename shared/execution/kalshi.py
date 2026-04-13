@@ -51,13 +51,14 @@ def _get_fill_count(result: dict) -> int:
     return int(float(count))
 
 
-def _compute_fill_price(result: dict, outcome: str) -> Decimal | None:
+def _compute_fill_price(result: dict) -> Decimal | None:
     """Compute average fill price from Kalshi response fields.
 
-    Kalshi API returns dollar-denominated fields (current) or cent fields
-    (legacy). Handles both:
-        taker_fill_cost_dollars / fill_count_fp  (dollars, no conversion)
-        taker_fill_cost / fill_count / 100       (cents, convert to dollars)
+    Kalshi's taker_fill_cost represents the actual cost paid, regardless
+    of YES/NO side. Dividing by fill count gives the correct per-contract
+    price directly — no YES/NO conversion needed.
+
+    Handles dollar-denominated (current) and cent-denominated (legacy) fields.
     """
     fill_count = _get_fill_count(result)
     if not fill_count:
@@ -69,21 +70,17 @@ def _compute_fill_price(result: dict, outcome: str) -> Decimal | None:
         cost_dec = Decimal(str(cost_dollars))
         if cost_dec == 0:
             return None
-        yes_fill = cost_dec / Decimal(str(fill_count))
-    else:
-        # Legacy cent-denominated fields
-        taker_fill_cost = result.get("taker_fill_cost", 0)
-        if not taker_fill_cost:
-            return None
-        yes_fill = (
-            Decimal(str(taker_fill_cost))
-            / Decimal(str(fill_count))
-            / Decimal("100")
-        )
+        return cost_dec / Decimal(str(fill_count))
 
-    if outcome == "no":
-        return Decimal("1") - yes_fill
-    return yes_fill
+    # Legacy cent-denominated fields
+    taker_fill_cost = result.get("taker_fill_cost", 0)
+    if not taker_fill_cost:
+        return None
+    return (
+        Decimal(str(taker_fill_cost))
+        / Decimal(str(fill_count))
+        / Decimal("100")
+    )
 
 
 class KalshiExecutionEngine(AbstractExecutionEngine):
@@ -146,7 +143,7 @@ class KalshiExecutionEngine(AbstractExecutionEngine):
             result = await self._client.place_order(kalshi_order)
             status = _map_kalshi_status(result.get("status", ""))
             fill_count = _get_fill_count(result)
-            fill_price = _compute_fill_price(result, order.outcome.value)
+            fill_price = _compute_fill_price(result)
             taker_fees = (
                 result.get("taker_fees_dollars")
                 or result.get("taker_fees")
@@ -245,19 +242,32 @@ class KalshiExecutionEngine(AbstractExecutionEngine):
         return result
 
     async def get_positions(self, market_id: str | None = None) -> list[Position]:
-        positions = await self._client.get_positions(ticker=market_id)
+        # Kalshi v2 portfolio fields:
+        #   position_fp: signed quantity (positive = YES, negative = NO),
+        #     "0.00" when flat
+        #   market_exposure_dollars: dollar cost of the open position
+        #   ticker: market ticker
+        # The legacy yes_count/no_count/avg_*_price fields no longer exist.
+        # Use count_filter=position so the API returns only non-zero positions.
+        positions = await self._client.get_positions(
+            ticker=market_id, count_filter="position",
+        )
         result = []
         for p in positions:
             ticker = p.get("ticker", "")
-            for side_key, outcome in [("yes", Outcome.YES), ("no", Outcome.NO)]:
-                size = int(float(p.get(f"{side_key}_count", 0) or 0))
-                if size > 0:
-                    result.append(Position(
-                        market_id=ticker,
-                        outcome=outcome,
-                        size=Decimal(str(size)),
-                        avg_entry_price=dec(p.get(f"avg_{side_key}_price")) or Decimal("0"),
-                    ))
+            qty = float(p.get("position_fp", 0) or 0)
+            if qty == 0:
+                continue
+            size = Decimal(str(abs(int(qty))))
+            outcome = Outcome.YES if qty > 0 else Outcome.NO
+            exposure = dec(p.get("market_exposure_dollars")) or Decimal("0")
+            avg_price = (exposure / size) if size > 0 else Decimal("0")
+            result.append(Position(
+                market_id=ticker,
+                outcome=outcome,
+                size=size,
+                avg_entry_price=avg_price,
+            ))
         return result
 
     async def get_balance(self) -> Decimal:

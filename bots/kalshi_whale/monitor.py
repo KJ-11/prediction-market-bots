@@ -74,14 +74,6 @@ class PositionMonitor:
         return len(self._positions)
 
     @property
-    def open_cost(self) -> Decimal:
-        """Total entry cost locked in open positions (for equity calculation)."""
-        return sum(
-            p.entry_price * p.size
-            for p in self._positions.values()
-        )
-
-    @property
     def results(self) -> asyncio.Queue[tuple[str, Decimal]]:
         """Queue of (ticker, pnl) for settled positions."""
         return self._results
@@ -159,8 +151,19 @@ class PositionMonitor:
                     winning = Outcome.YES if result == "yes" else Outcome.NO
                     await self._engine.settle_market(ticker, winning)
 
+                # Delay for Kalshi to credit settlement payout
+                if not isinstance(self._engine, PaperExecutionEngine):
+                    await asyncio.sleep(5)
                 balance = await self._engine.get_balance()
-                equity = balance + self.open_cost
+                # Source equity from real Kalshi positions, not the in-memory
+                # monitor cache — see _fetch_balance_and_equity in main.py for
+                # the rationale (positions opened pre-restart aren't tracked).
+                live_positions = await self._engine.get_positions()
+                live_open_cost = sum(
+                    (p.size * p.avg_entry_price for p in live_positions),
+                    Decimal("0"),
+                )
+                equity = balance + live_open_cost
 
                 self._tracker.log_settlement(
                     market_ticker=ticker,

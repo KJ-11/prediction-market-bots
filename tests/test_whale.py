@@ -13,6 +13,7 @@ from bots.kalshi_whale.discovery import Watchlist, WatchlistMarket, parse_ticker
 from bots.kalshi_whale.monitor import PositionMonitor, TrackedPosition
 from bots.kalshi_whale.signal import WhaleDetector
 from bots.kalshi_whale.sizing import compute_size, kalshi_fee
+from shared.execution.kalshi import _compute_fill_price, _get_fill_count
 from bots.kalshi_whale.strategy import (
     MarketWhaleState,
     WhaleConfig,
@@ -570,3 +571,67 @@ class TestBalanceTracking:
         cost = entry_price * contracts
         pnl = payout - cost
         assert pnl == Decimal("1.00")  # No fee deducted
+
+
+# ── Fill price computation (Bug 1 fix) ─────────────────────────────
+
+class TestComputeFillPrice:
+    """Verify _compute_fill_price returns correct price for YES and NO."""
+
+    def test_yes_fill_dollars(self):
+        """YES buy: cost/count = YES price directly."""
+        result = {
+            "taker_fill_cost_dollars": 62.98,  # 0.94 * 67
+            "fill_count_fp": "67.00",
+        }
+        price = _compute_fill_price(result)
+        assert price is not None
+        assert abs(price - Decimal("0.94")) < Decimal("0.001")
+
+    def test_no_fill_dollars(self):
+        """NO buy: cost/count = NO price directly (NOT the YES price).
+
+        This was the bug — the old code returned 1-price, double-inverting.
+        A NO buy at NO_price=0.93 should return 0.93, not 0.07.
+        """
+        # 135 NO contracts at NO price $0.93 → cost = $125.55
+        result = {
+            "taker_fill_cost_dollars": 125.55,
+            "fill_count_fp": "135.00",
+        }
+        price = _compute_fill_price(result)
+        assert price is not None
+        # Should be ~0.93 (NO price), NOT 0.07 (YES price)
+        assert abs(price - Decimal("0.93")) < Decimal("0.001")
+        assert price > Decimal("0.50")  # Sanity: definitely not the YES price
+
+    def test_yes_fill_legacy_cents(self):
+        """Legacy cent-denominated fields work for YES."""
+        result = {
+            "taker_fill_cost": 6298,  # 94 cents * 67 contracts
+            "fill_count": 67,
+        }
+        price = _compute_fill_price(result)
+        assert price is not None
+        assert abs(price - Decimal("0.94")) < Decimal("0.001")
+
+    def test_no_fill_legacy_cents(self):
+        """Legacy cent-denominated fields work for NO."""
+        result = {
+            "taker_fill_cost": 12555,  # 93 cents * 135 contracts
+            "fill_count": 135,
+        }
+        price = _compute_fill_price(result)
+        assert price is not None
+        assert abs(price - Decimal("0.93")) < Decimal("0.01")
+
+    def test_zero_fill_count(self):
+        result = {"taker_fill_cost_dollars": 100, "fill_count_fp": "0"}
+        assert _compute_fill_price(result) is None
+
+    def test_zero_cost(self):
+        result = {"taker_fill_cost_dollars": 0, "fill_count_fp": "10.00"}
+        assert _compute_fill_price(result) is None
+
+    def test_no_fields(self):
+        assert _compute_fill_price({}) is None
