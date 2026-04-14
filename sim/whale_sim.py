@@ -3,8 +3,7 @@
 Usage:
     python -m sim.whale_sim                  # Full sweep
     python -m sim.whale_sim --quick          # Reduced grid, N=1000
-    python -m sim.whale_sim --single         # One scenario with charts
-    python -m sim.whale_sim --no-charts      # Skip chart generation
+    python -m sim.whale_sim --single         # One scenario
 """
 
 from __future__ import annotations
@@ -23,10 +22,12 @@ DEFAULT_OUTPUT_DIR = Path("data/sim_results")
 def main() -> None:
     parser = argparse.ArgumentParser(description="Whale signal Monte Carlo simulation")
     parser.add_argument("--quick", action="store_true", help="Reduced grid, N=1000")
-    parser.add_argument("--single", action="store_true", help="Single scenario with charts")
-    parser.add_argument("--no-charts", action="store_true", help="Skip chart generation")
+    parser.add_argument("--single", action="store_true", help="Run a single scenario")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR, help="Output directory")
-    parser.add_argument("--sims", type=int, default=None, help="Override number of simulations per combo")
+    parser.add_argument(
+        "--sims", type=int, default=None,
+        help="Override number of simulations per combo",
+    )
     parser.add_argument("--days", type=int, default=365, help="Number of days to simulate")
     parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducibility")
 
@@ -52,7 +53,7 @@ def main() -> None:
 
 
 def _run_single(args: argparse.Namespace) -> None:
-    """Run a single scenario and display results + charts."""
+    """Run a single scenario and print the summary."""
     params = TradeParams(
         win_rate=args.win_rate,
         entry_price=args.entry_price,
@@ -71,17 +72,16 @@ def _run_single(args: argparse.Namespace) -> None:
     )
 
     print(f"Running single scenario: {params}")
-    print(f"Config: {config.num_simulations} sims x {config.num_days} days, starting ${config.starting_bankroll}")
+    print(
+        f"Config: {config.num_simulations} sims x {config.num_days} days, "
+        f"starting ${config.starting_bankroll}"
+    )
     start = time.time()
     result = simulate_scenario(params, config, store_trajectories=True)
     elapsed = time.time() - start
     print(f"Completed in {elapsed:.1f}s\n")
 
     _print_single_result(result)
-
-    if not args.no_charts:
-        from sim.charts import generate_all_charts
-        generate_all_charts([], args.output, single_result=result)
 
 
 def _run_sweep(args: argparse.Namespace) -> None:
@@ -108,11 +108,6 @@ def _run_sweep(args: argparse.Namespace) -> None:
     # Print summary
     print_summary(results)
     print_sensitivity(results)
-
-    # Charts
-    if not args.no_charts:
-        from sim.charts import generate_all_charts
-        generate_all_charts(results, args.output)
 
 
 def _print_single_result(r) -> None:

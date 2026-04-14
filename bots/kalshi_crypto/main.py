@@ -18,7 +18,7 @@ import asyncio
 import logging
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from bots.kalshi_crypto.discovery import (
@@ -38,6 +38,7 @@ from shared.execution.kalshi import KalshiExecutionEngine
 from shared.execution.paper import PaperExecutionEngine
 from shared.risk import CircuitBreaker, KillSwitch, KillSwitchTriggered, RiskLimits
 from shared.runner import BotRunner
+from shared.summary import midnight_summary_loop
 from shared.trade_log import TradeLog
 from shared.types import PriceUpdate
 from shared.utils.logging import setup_logging
@@ -66,24 +67,15 @@ def _round_window(ctx: RoundContext) -> str:
     return f"{open_cst.strftime('%H:%M')}\u2013{close_cst.strftime('%H:%M')}"
 
 
-async def _midnight_summary_task(
+def _make_crypto_summary_fn(
     alerts: AlertManager,
     engine,
     shadow_engine,
     daily_stats: dict,
-) -> None:
-    """Fire daily summary at midnight CST, then reset stats."""
-    while True:
-        now = datetime.now(CST)
-        # Next midnight CST
-        tomorrow = (now + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0,
-        )
-        wait_seconds = (tomorrow - now).total_seconds()
-        await asyncio.sleep(wait_seconds)
-
-        # Send summary
-        date_str = now.strftime("%b %-d")
+):
+    """Build the per-midnight summary callback for the crypto bot."""
+    async def summary_fn() -> None:
+        date_str = datetime.now(CST).strftime("%b %-d")
         balance = await engine.get_balance()
 
         shadow_line = None
@@ -101,12 +93,11 @@ async def _midnight_summary_task(
             total_signals=daily_stats["signals"],
             shadow_line=shadow_line,
         )
-
-        # Reset daily stats
         daily_stats["trades"] = 0
         daily_stats["wins"] = 0
         daily_stats["pnl"] = Decimal("0")
         daily_stats["signals"] = 0
+    return summary_fn
 
 
 async def run_bot(
@@ -218,7 +209,9 @@ async def run_bot(
 
     # Start midnight summary task
     summary_task = asyncio.create_task(
-        _midnight_summary_task(alerts, engine, shadow_engine, daily_stats),
+        midnight_summary_loop(
+            _make_crypto_summary_fn(alerts, engine, shadow_engine, daily_stats),
+        ),
         name="midnight-summary",
     )
 

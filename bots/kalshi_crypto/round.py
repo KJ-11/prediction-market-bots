@@ -27,7 +27,17 @@ from shared.ws.spot import COIN_TO_COINBASE, SpotPriceUpdate
 
 logger = logging.getLogger(__name__)
 
+# Per-iteration timeout for draining price queues. Long enough to batch
+# bursts of updates, short enough to respond to shutdown requests.
 QUEUE_DRAIN_TIMEOUT = 0.5
+
+# Wait for each coin to have this many price ticks before trusting the feed
+# and allowing signals — guards against stale WS books on reconnect.
+MIN_PRICE_UPDATES_BEFORE_SIGNAL = 3
+
+# Cap per-round trades across all coins so a runaway signal loop can't
+# burn the whole round's budget on one minute.
+MAX_TRADES_PER_ROUND = 3
 
 
 async def _sleep_until_midnight_cst(runner: BotRunner) -> None:
@@ -204,10 +214,11 @@ async def run_round(
                     break
 
             # Only run strategies once we have real Kalshi data
-            # (need at least 3 updates per coin to avoid stale initial data)
-            min_updates = 3
+            # (avoid stale initial data from the WS feed).
             coins_warmed = sum(
-                1 for c in kalshi_update_counts.values() if c >= min_updates
+                1
+                for c in kalshi_update_counts.values()
+                if c >= MIN_PRICE_UPDATES_BEFORE_SIGNAL
             )
             if coins_warmed < len(active_contexts):
                 try:
@@ -230,8 +241,7 @@ async def run_round(
                 signals = strat.on_update(ctx, kalshi, spot)
                 all_signals.extend(signals)
 
-            # Execute signals (cap at 3 per round — one per coin max)
-            max_trades_per_round = 3
+            # Execute signals (capped per round — one per coin max).
             for signal in all_signals:
                 round_signals += 1
                 sig_series = ticker_to_series.get(signal.order.market_id)
@@ -243,7 +253,7 @@ async def run_round(
                     f"{coin}: {signal.reason} (confidence={signal.confidence:.3f})",
                 )
 
-                if round_trades >= max_trades_per_round:
+                if round_trades >= MAX_TRADES_PER_ROUND:
                     logger.info(
                         "Skipping signal (round trade cap): %s",
                         signal.reason,
@@ -316,111 +326,30 @@ async def run_round(
                 pass
 
     finally:
-        # Stop Kalshi WS
-        await kalshi_ws.stop()
-        kalshi_ws_task.cancel()
-        try:
-            await kalshi_ws_task
-        except asyncio.CancelledError:
-            pass
+        await _teardown_round(
+            kalshi_ws, kalshi_ws_task, pm_signal_tasks, pm_stop_event,
+            strategies, active_contexts, engine,
+        )
 
-        # Stop PM signal polling
-        pm_stop_event.set()
-        for task in pm_signal_tasks:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        # Cancel open orders
-        for ctx in active_contexts.values():
-            cancelled = await engine.cancel_all(market_id=ctx.ticker)
-            if cancelled:
-                logger.info("Cancelled %d orders for %s", cancelled, ctx.ticker)
-
-        # Notify strategies
-        for series, strat in strategies.items():
-            if series in active_contexts:
-                strat.on_round_end()
-
-        # Settle positions in paper mode using Kalshi API resolution
-        engines_to_settle: list[tuple[str, PaperExecutionEngine]] = []
-        if isinstance(engine, PaperExecutionEngine):
-            engines_to_settle.append(("paper", engine))
-        if shadow_engine is not None:
-            engines_to_settle.append(("shadow", shadow_engine))
-
-        if engines_to_settle:
-            # Wait for settlement only if we didn't already wait for live fills
-            if not live_fills:
-                await asyncio.sleep(15)
-            for series, ctx in active_contexts.items():
-                # Reuse market results already fetched for live P&L
-                winning = market_results.get(ctx.ticker)
-                if winning is None:
-                    winning = await _fetch_market_result(client, ctx.ticker)
-                if winning is None:
-                    spot = latest_spots.get(series)
-                    if spot is None:
-                        continue
-                    winning = Outcome.YES if spot > ctx.floor_strike else Outcome.NO
-                    logger.warning(
-                        "Kalshi not settled for %s, using spot fallback",
-                        ctx.ticker,
-                    )
-                for label, eng in engines_to_settle:
-                    settle_pnl = await eng.settle_market(
-                        ctx.ticker, winning,
-                    )
-                    if settle_pnl != 0:
-                        logger.info(
-                            "[%s] Settled %s: %s won, pnl=$%+.2f",
-                            label, ctx.ticker, winning.value, settle_pnl,
-                        )
+        await _settle_paper_engines(
+            engine, shadow_engine, client, active_contexts,
+            latest_spots, market_results, live_fills,
+        )
 
         # Wait for Kalshi to publish market results before fetching them
         if live_fills and not isinstance(engine, PaperExecutionEngine):
             await asyncio.sleep(15)
 
-        # Compute P&L from actual fills + market resolution (not balance delta)
-        round_pnl = Decimal("0")
-        round_wins = 0
+        round_pnl, round_wins = await _compute_live_pnl(
+            client, live_fills, market_results, coin_lines,
+        )
 
-        if live_fills:
-            # Fetch market results for tickers we traded
-            traded_tickers = {f["ticker"] for f in live_fills}
-            for ticker in traded_tickers:
-                if ticker not in market_results:
-                    market_results[ticker] = await _fetch_market_result(
-                        client, ticker,
-                    )
-
-            # Calculate P&L per fill and build coin lines
-            for fill in live_fills:
-                winner = market_results.get(fill["ticker"])
-                if winner is None:
-                    logger.warning("No result for %s, can't compute P&L", fill["ticker"])
-                    coin_lines.append(f"{fill['coin']}: result unknown")
-                    continue
-                fill_pnl, line = _compute_fill_pnl(fill, winner)
-                if fill["outcome"] == winner:
-                    round_wins += 1
-                coin_lines.append(line)
-                round_pnl += fill_pnl
-                logger.info(
-                    "Fill P&L: %s %s @ $%.2f x%s → %s won → $%+.4f",
-                    fill["outcome"].value, fill["ticker"],
-                    fill["price"], fill["size"], winner.value, fill_pnl,
-                )
-
-        # Add skip reasons for coins that had signals but didn't trade
         for coin, reason in skip_reasons.items():
             if coin not in traded_coins:
                 coin_lines.append(f"{coin}: skipped ({reason})")
 
-        # Compute balance locally — Kalshi API has settlement lag and
-        # may not reflect won positions yet
+        # Local balance — Kalshi API has settlement lag and may not reflect
+        # won positions yet.
         balance_after = round_start_balance + round_pnl
 
         for ctx in active_contexts.values():
@@ -428,30 +357,10 @@ async def run_round(
                 ctx.ticker, round_signals, round_trades, balance_after,
             )
 
-        # Shadow summary line — show per-trade details
-        shadow_summary = None
-        if shadow_engine is not None:
-            shadow_bal = await shadow_engine.get_balance()
-            if shadow_fills:
-                shadow_lines = []
-                shadow_round_pnl = Decimal("0")
-                for sf in shadow_fills:
-                    winner = market_results.get(sf["ticker"])
-                    if winner is None:
-                        shadow_lines.append(f"{sf['coin']}: result unknown")
-                        continue
-                    sf_pnl, sf_line = _compute_fill_pnl(sf, winner)
-                    shadow_lines.append(sf_line)
-                    shadow_round_pnl += sf_pnl
-                detail = "\n".join(shadow_lines)
-                shadow_summary = (
-                    f"{detail}\n"
-                    f"P&L: ${shadow_round_pnl:+.2f} | Balance: ${shadow_bal:.2f}"
-                )
-            else:
-                shadow_summary = f"no trades | ${shadow_bal:.2f}"
+        shadow_summary = await _build_shadow_summary(
+            shadow_engine, shadow_fills, market_results,
+        )
 
-        # Send consolidated round summary
         await alerts.round_summary(
             window=window,
             coin_lines=coin_lines,
@@ -480,6 +389,161 @@ async def run_round(
         "signals": round_signals,
         "balance_after": balance_after,
     }
+
+
+async def _teardown_round(
+    kalshi_ws: KalshiWSManager,
+    kalshi_ws_task: asyncio.Task,
+    pm_signal_tasks: list[asyncio.Task],
+    pm_stop_event: asyncio.Event,
+    strategies: dict[str, BaseStrategy],
+    active_contexts: dict[str, RoundContext],
+    engine,
+) -> None:
+    """Stop WS + PM pollers, cancel open orders, notify strategies of round end."""
+    await kalshi_ws.stop()
+    kalshi_ws_task.cancel()
+    try:
+        await kalshi_ws_task
+    except asyncio.CancelledError:
+        pass
+
+    pm_stop_event.set()
+    for task in pm_signal_tasks:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    for ctx in active_contexts.values():
+        cancelled = await engine.cancel_all(market_id=ctx.ticker)
+        if cancelled:
+            logger.info("Cancelled %d orders for %s", cancelled, ctx.ticker)
+
+    for series, strat in strategies.items():
+        if series in active_contexts:
+            strat.on_round_end()
+
+
+async def _settle_paper_engines(
+    engine,
+    shadow_engine: PaperExecutionEngine | None,
+    client: KalshiClient,
+    active_contexts: dict[str, RoundContext],
+    latest_spots: dict[str, Decimal],
+    market_results: dict[str, Outcome | None],
+    live_fills: list[dict],
+) -> None:
+    """Settle paper + shadow positions using Kalshi resolution (or spot fallback).
+
+    Mutates market_results in place, so _compute_live_pnl can reuse fetches.
+    """
+    engines_to_settle: list[tuple[str, PaperExecutionEngine]] = []
+    if isinstance(engine, PaperExecutionEngine):
+        engines_to_settle.append(("paper", engine))
+    if shadow_engine is not None:
+        engines_to_settle.append(("shadow", shadow_engine))
+
+    if not engines_to_settle:
+        return
+
+    # Wait for settlement only if we didn't already wait for live fills
+    if not live_fills:
+        await asyncio.sleep(15)
+
+    for series, ctx in active_contexts.items():
+        winning = market_results.get(ctx.ticker)
+        if winning is None:
+            winning = await _fetch_market_result(client, ctx.ticker)
+            market_results[ctx.ticker] = winning
+        if winning is None:
+            spot = latest_spots.get(series)
+            if spot is None:
+                continue
+            winning = Outcome.YES if spot > ctx.floor_strike else Outcome.NO
+            logger.warning(
+                "Kalshi not settled for %s, using spot fallback",
+                ctx.ticker,
+            )
+        for label, eng in engines_to_settle:
+            settle_pnl = await eng.settle_market(ctx.ticker, winning)
+            if settle_pnl != 0:
+                logger.info(
+                    "[%s] Settled %s: %s won, pnl=$%+.2f",
+                    label, ctx.ticker, winning.value, settle_pnl,
+                )
+
+
+async def _compute_live_pnl(
+    client: KalshiClient,
+    live_fills: list[dict],
+    market_results: dict[str, Outcome | None],
+    coin_lines: list[str],
+) -> tuple[Decimal, int]:
+    """Fetch market resolutions for live fills and compute per-fill P&L.
+
+    Returns (total_pnl, wins) and appends one line per fill to coin_lines.
+    """
+    round_pnl = Decimal("0")
+    round_wins = 0
+
+    if not live_fills:
+        return round_pnl, round_wins
+
+    traded_tickers = {f["ticker"] for f in live_fills}
+    for ticker in traded_tickers:
+        if ticker not in market_results:
+            market_results[ticker] = await _fetch_market_result(client, ticker)
+
+    for fill in live_fills:
+        winner = market_results.get(fill["ticker"])
+        if winner is None:
+            logger.warning("No result for %s, can't compute P&L", fill["ticker"])
+            coin_lines.append(f"{fill['coin']}: result unknown")
+            continue
+        fill_pnl, line = _compute_fill_pnl(fill, winner)
+        if fill["outcome"] == winner:
+            round_wins += 1
+        coin_lines.append(line)
+        round_pnl += fill_pnl
+        logger.info(
+            "Fill P&L: %s %s @ $%.2f x%s → %s won → $%+.4f",
+            fill["outcome"].value, fill["ticker"],
+            fill["price"], fill["size"], winner.value, fill_pnl,
+        )
+
+    return round_pnl, round_wins
+
+
+async def _build_shadow_summary(
+    shadow_engine: PaperExecutionEngine | None,
+    shadow_fills: list[dict],
+    market_results: dict[str, Outcome | None],
+) -> str | None:
+    """Build the shadow-engine summary block for the round alert, or None."""
+    if shadow_engine is None:
+        return None
+
+    shadow_bal = await shadow_engine.get_balance()
+    if not shadow_fills:
+        return f"no trades | ${shadow_bal:.2f}"
+
+    shadow_lines: list[str] = []
+    shadow_round_pnl = Decimal("0")
+    for sf in shadow_fills:
+        winner = market_results.get(sf["ticker"])
+        if winner is None:
+            shadow_lines.append(f"{sf['coin']}: result unknown")
+            continue
+        sf_pnl, sf_line = _compute_fill_pnl(sf, winner)
+        shadow_lines.append(sf_line)
+        shadow_round_pnl += sf_pnl
+    detail = "\n".join(shadow_lines)
+    return (
+        f"{detail}\n"
+        f"P&L: ${shadow_round_pnl:+.2f} | Balance: ${shadow_bal:.2f}"
+    )
 
 
 async def _execute_signal(

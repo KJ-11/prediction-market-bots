@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 
+# Kalshi WS rejects subscribe commands with more tickers than this per batch.
+WS_SUBSCRIBE_BATCH = 500
+
 
 class WhaleDetector:
     """Detects whale trades and scores markets for entry signals.
@@ -136,10 +139,9 @@ class WhaleDetector:
             return
 
         ticker_list = list(new_tickers)
-        batch_size = 500
         sub_id = 1
-        for i in range(0, len(ticker_list), batch_size):
-            batch = ticker_list[i : i + batch_size]
+        for i in range(0, len(ticker_list), WS_SUBSCRIBE_BATCH):
+            batch = ticker_list[i : i + WS_SUBSCRIBE_BATCH]
             await ws.send(json.dumps({
                 "id": sub_id,
                 "cmd": "subscribe",

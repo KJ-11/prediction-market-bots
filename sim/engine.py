@@ -18,7 +18,7 @@ from sim.config import (
     TradeParams,
 )
 from sim.fees import kalshi_fee
-from sim.outputs import MILESTONES, MILESTONE_ATTRS, SimResult
+from sim.outputs import MILESTONE_ATTRS, MILESTONES, SimResult
 from sim.sizing import compute_contracts, get_risk_cap
 
 logger = logging.getLogger(__name__)

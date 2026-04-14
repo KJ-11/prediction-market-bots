@@ -1,4 +1,4 @@
-"""Tests for shared/risk.py — KillSwitch and RiskLimits."""
+"""Tests for the shared/risk/ package — KillSwitch, RiskLimits, CircuitBreaker."""
 
 from __future__ import annotations
 

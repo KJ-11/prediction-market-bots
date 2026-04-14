@@ -20,9 +20,11 @@ from bots.kalshi_whale.strategy import (
     WhaleTrade,
 )
 from bots.kalshi_whale.tracking import WhaleTracker
-from shared.execution.kalshi import _compute_fill_price
+from shared.execution.kalshi import KalshiExecutionEngine
 from shared.execution.paper import PaperExecutionEngine
 from shared.types import OrderRequest, Outcome, PriceUpdate, Side
+
+_compute_fill_price = KalshiExecutionEngine._compute_fill_price
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -604,26 +606,6 @@ class TestComputeFillPrice:
         # Should be ~0.93 (NO price), NOT 0.07 (YES price)
         assert abs(price - Decimal("0.93")) < Decimal("0.001")
         assert price > Decimal("0.50")  # Sanity: definitely not the YES price
-
-    def test_yes_fill_legacy_cents(self):
-        """Legacy cent-denominated fields work for YES."""
-        result = {
-            "taker_fill_cost": 6298,  # 94 cents * 67 contracts
-            "fill_count": 67,
-        }
-        price = _compute_fill_price(result)
-        assert price is not None
-        assert abs(price - Decimal("0.94")) < Decimal("0.001")
-
-    def test_no_fill_legacy_cents(self):
-        """Legacy cent-denominated fields work for NO."""
-        result = {
-            "taker_fill_cost": 12555,  # 93 cents * 135 contracts
-            "fill_count": 135,
-        }
-        price = _compute_fill_price(result)
-        assert price is not None
-        assert abs(price - Decimal("0.93")) < Decimal("0.01")
 
     def test_zero_fill_count(self):
         result = {"taker_fill_cost_dollars": 100, "fill_count_fp": "0"}

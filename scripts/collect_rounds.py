@@ -3,7 +3,7 @@
 Observes every round: logs spot prices, Kalshi bid/ask, and round outcome
 to CSV. Designed to run unattended for 24+ hours.
 
-Output: data/rounds/KXBTC15M-YYYY-MM-DD.csv
+Output: data/rounds/kalshi/KXBTC15M-YYYY-MM-DD.csv
 
 Each row = one snapshot (every ~1 second):
     timestamp, round_ticker, seconds_remaining, spot_price,
@@ -76,7 +76,7 @@ CSV_HEADERS = [
 class RoundCollector:
     """Collects data for one series across many rounds."""
 
-    def __init__(self, series: str, data_dir: str = "data/rounds") -> None:
+    def __init__(self, series: str, data_dir: str = "data/rounds/kalshi") -> None:
         self._series = series
         self._data_dir = Path(data_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -208,7 +208,7 @@ class RoundCollector:
 
 
 
-def _find_last_round_ticker(series: str, data_dir: str = "data/rounds") -> str:
+def _find_last_round_ticker(series: str, data_dir: str = "data/rounds/kalshi") -> str:
     """Check existing CSV for the last completed round to avoid duplicates on restart."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     path = Path(data_dir) / f"{series}-{today}.csv"

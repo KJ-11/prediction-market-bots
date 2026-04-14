@@ -5,20 +5,31 @@ Building prediction market trading bots across Kalshi and Polymarket. Crypto (15
 
 ## Project Structure
 - `shared/` — Reusable infrastructure (clients, execution, risk, alerts, ws, utils)
-- `bots/kalshi_crypto/` — Reference bot implementation (template for new bots: main.py is setup+loop, round.py is per-round execution)
+- `bots/kalshi_crypto/` — Reference per-round bot (discovery → round execution); template for round-based verticals
+- `bots/kalshi_whale/` — Event-driven bot (continuous WS → signal → monitor); template for event-based verticals
 - `scripts/` — Data collectors (`collect_rounds.py`, `collect_polymarket.py`), performance reporting, smoke tests
 - `tests/` — Test suite
 - `data/` — Trade logs, round snapshots, alert logs, circuit breaker state, lifecycle metadata
-- `research/` — Market mechanics (`kalshi-mechanics.md`, `polymarket-mechanics.md`) and strategy evaluation
+- `research/` — Market mechanics reference (`kalshi-mechanics.md`, `polymarket-mechanics.md`)
 
 ## Building a New Bot
-Use `bots/kalshi_crypto/` as the template. The pattern:
+Two templates depending on market structure. Shared pieces: `discovery.py`, `strategy.py`, `sizing.py`, `main.py`.
+
+**Per-round (see `bots/kalshi_crypto/`)** — markets open and close on a fixed cadence (e.g. 15-min crypto).
 1. **`discovery.py`** — Find active markets for this round
 2. **`strategy.py`** — Define `RoundContext`, `TradeSignal`, `BaseStrategy` ABC
 3. **`strategies/`** — Concrete strategy implementations (e.g., `spot_distance.py`)
-4. **`sizing.py`** — Position sizing (Kelly criterion with fee model)
+4. **`sizing.py`** — Fractional Kelly with Kalshi fee model
 5. **`main.py`** — Entry point: setup engines/risk/strategies, main discovery loop
 6. **`round.py`** — Round execution: subscribe to markets, run strategies, execute signals, settle
+
+**Event-driven (see `bots/kalshi_whale/`)** — continuously listen for signals across many markets (e.g. whale trades).
+1. **`discovery.py`** — Maintain a watchlist of active markets
+2. **`strategy.py`** — Signal types + config (no per-round abstraction)
+3. **`signal.py`** — Long-lived WS loop; emits `WhaleSignal` onto a queue when criteria met
+4. **`sizing.py`** — Phase-based half_port sizing (balance-tier allocation)
+5. **`main.py`** — Entry point: spawns 4 concurrent loops (discovery / detector / signal consumer / monitor)
+6. **`monitor.py`** — Position monitor: stop-loss via WS price feed, settlement via REST poll
 
 `shared/` provides: API clients, execution engines (live + paper), risk management (kill switch, circuit breaker, risk limits), WebSocket feeds, alerting (Telegram + file), trade logging, bot lifecycle runner.
 
@@ -59,7 +70,7 @@ Use `bots/kalshi_crypto/` as the template. The pattern:
 - GCP project: `<GCP_PROJECT>` (named "Bots"), account: `kshjhun@gmail.com`
   - NOT `profitlabs` — that is a different project with a different account (`<CONTACT_EMAIL>`)
 - **GCP config:** Always use `gcloud config configurations activate bots` before running gcloud commands. Verify with `gcloud config configurations list`.
-- 21 Docker services: bot + 4 Kalshi collectors + 16 PM collectors (4 coins x 4 durations)
+- Docker services: see `docker-compose.yml`. Whale bot + Kalshi collectors (4 coins) + Polymarket collectors (4 coins × 4 durations). Collectors are currently paused; re-enable by `docker compose up -d <name>`.
 - See `OPS.md` for full operations guide (health checks, logs, data, deploy, emergency controls)
 - SSH: `gcloud compute ssh <VM_NAME> --zone=<GCP_ZONE> --project=<GCP_PROJECT>`
 - When diagnosing production issues, always check VM state (SSH + docker logs), not local state.
@@ -95,6 +106,3 @@ Use `bots/kalshi_crypto/` as the template. The pattern:
 
 Research findings (strategy research, market mechanics) get routed to `Code/Vault/Projects/Bots/actions.md`. Strategy notes go in `Code/Vault/Projects/Bots/Notes/`.
 
-## Lessons Learned
-
-_(Add entries as the project progresses. Format: what happened and what to do instead.)_

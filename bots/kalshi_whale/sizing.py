@@ -1,5 +1,3 @@
-# Position sizing. Risk-phased half_port sizing for whale bot.
-
 """Position sizing — risk-phased half_port from Monte Carlo sim.
 
 Phases (from sim validation):
@@ -18,10 +16,9 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
-logger = logging.getLogger(__name__)
+from shared.fees import kalshi_fee
 
-FEE_COEFFICIENT = Decimal("0.07")
-ONE_CENT = Decimal("0.01")
+logger = logging.getLogger(__name__)
 
 # Phase thresholds: (min_balance, allocation_pct)
 PHASES: list[tuple[Decimal, float]] = [
@@ -31,12 +28,6 @@ PHASES: list[tuple[Decimal, float]] = [
     (Decimal("500"), 0.50),
     (Decimal("0"), 1.00),
 ]
-
-
-def kalshi_fee(price: Decimal, contracts: int = 1) -> Decimal:
-    """Calculate Kalshi taker fee for an order (rounded up to next cent)."""
-    raw = FEE_COEFFICIENT * contracts * price * (Decimal("1") - price)
-    return raw.quantize(ONE_CENT, rounding="ROUND_CEILING")
 
 
 def compute_size(price: Decimal, balance: Decimal) -> int:

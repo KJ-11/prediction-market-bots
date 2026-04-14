@@ -1,18 +1,23 @@
-"""Kill switch and risk limits — checked before every order."""
+"""Circuit breaker: consecutive losses, daily loss, drawdown from ATH.
+
+State persists to disk so Docker restarts don't reset the breaker mid-day.
+
+Triggers:
+    - 3 consecutive round losses → skip next round
+    - Daily loss > daily_loss_limit_pct of day-start balance → stop for day
+    - Total drawdown > dynamic threshold from ATH → KillSwitchTriggered (24h pause)
+"""
 
 from __future__ import annotations
 
 import json
 import logging
-import time
-from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from shared.execution.base import AbstractExecutionEngine
-from shared.types import OrderRequest
+from shared.risk.kill_switch import KillSwitchTriggered
 
 logger = logging.getLogger(__name__)
 
@@ -20,206 +25,16 @@ CST = ZoneInfo("America/Chicago")
 DEFAULT_BREAKER_FILE = Path("data/circuit_breaker.json")
 
 
-class KillSwitchTriggered(Exception):
-    """Raised when any kill condition fires. Runner catches this → exit code 42."""
-
-    def __init__(self, reason: str) -> None:
-        self.reason = reason
-        super().__init__(reason)
-
-
-class KillSwitch:
-    """Three kill conditions: file-based, loss-based, error-based.
-
-    Call check() on every loop iteration. Raises KillSwitchTriggered
-    if any condition is met.
-    """
-
-    def __init__(
-        self,
-        kill_file: str = "/tmp/prediction-bots-kill",
-        max_loss_pct: float = 20.0,
-        max_consecutive_errors: int = 10,
-        initial_balance: Decimal = Decimal("50"),
-    ) -> None:
-        self._kill_file = kill_file
-        self._max_loss_pct = max_loss_pct
-        self._max_consecutive_errors = max_consecutive_errors
-        self._initial_balance = initial_balance
-        self._consecutive_errors = 0
-        self._disabled = False
-
-    def record_error(self) -> None:
-        """Increment consecutive error counter."""
-        self._consecutive_errors += 1
-        logger.warning("Kill switch: error count = %d", self._consecutive_errors)
-
-    def clear_errors(self) -> None:
-        """Reset error counter after a successful operation."""
-        if self._consecutive_errors > 0:
-            self._consecutive_errors = 0
-
-    def disable(self) -> None:
-        """Disable kill switch (for testing only)."""
-        self._disabled = True
-
-    def check(self, current_balance: Decimal | None = None) -> None:
-        """Check all kill conditions. Raises KillSwitchTriggered if any fire."""
-        if self._disabled:
-            return
-
-        # File-based kill
-        if Path(self._kill_file).exists():
-            raise KillSwitchTriggered(
-                f"Kill file detected: {self._kill_file}"
-            )
-
-        # Error-based kill
-        if self._consecutive_errors >= self._max_consecutive_errors:
-            raise KillSwitchTriggered(
-                f"Too many consecutive errors: {self._consecutive_errors}"
-            )
-
-        # Loss-based kill
-        if current_balance is not None and self._initial_balance > 0:
-            loss_pct = (
-                (self._initial_balance - current_balance) / self._initial_balance
-            ) * 100
-            if loss_pct >= self._max_loss_pct:
-                raise KillSwitchTriggered(
-                    f"Capital loss {loss_pct:.1f}% exceeds limit {self._max_loss_pct}%"
-                )
-
-
-@dataclass
-class RiskCheckResult:
-    """Result of a risk check."""
-
-    allowed: bool
-    reason: str = ""
-
-
-class RiskLimits:
-    """Pre-trade risk checks: position size, exposure, per-trade loss.
-
-    All limits are percentage-based so they scale with balance.
-    Call check() before every order. Returns RiskCheckResult.
-    """
-
-    def __init__(
-        self,
-        max_position_pct: float = 50.0,
-        max_exposure_pct: float = 80.0,
-        max_loss_per_trade_pct: float = 30.0,
-        max_orders_per_min: int = 30,
-    ) -> None:
-        self._max_position_pct = max_position_pct
-        self._max_exposure_pct = max_exposure_pct
-        self._max_loss_per_trade_pct = max_loss_per_trade_pct
-        self._max_orders_per_min = max_orders_per_min
-        self._recent_orders: list[float] = []  # timestamps
-
-    async def check(
-        self,
-        order: OrderRequest,
-        engine: AbstractExecutionEngine,
-        *,
-        balance: Decimal | None = None,
-        equity: Decimal | None = None,
-    ) -> RiskCheckResult:
-        """Run all risk checks against an order.
-
-        Args:
-            balance: Pre-fetched cash balance. If None, fetches from engine.
-            equity: Pre-fetched equity (cash + positions). If None, computes
-                    from engine.get_balance() + engine.get_positions().
-        """
-        if balance is None:
-            balance = await engine.get_balance()
-        if balance <= 0:
-            return RiskCheckResult(
-                allowed=False, reason="Zero balance",
-            )
-
-        trade_cost = order.price * order.size
-        trade_pct = float(trade_cost / balance) * 100
-
-        # Per-trade loss check (binary: max loss = cost)
-        if trade_pct > self._max_loss_per_trade_pct:
-            return RiskCheckResult(
-                allowed=False,
-                reason=(
-                    f"Trade ${trade_cost:.2f} = {trade_pct:.0f}% "
-                    f"of balance (limit {self._max_loss_per_trade_pct:.0f}%)"
-                ),
-            )
-
-        # Position size check
-        if trade_pct > self._max_position_pct:
-            return RiskCheckResult(
-                allowed=False,
-                reason=(
-                    f"Position {trade_pct:.0f}% "
-                    f"of balance (limit {self._max_position_pct:.0f}%)"
-                ),
-            )
-
-        # Total exposure check — use equity (cash + positions) as denominator
-        # so that filled slots don't shrink the denominator and block new entries
-        if equity is None:
-            positions = await engine.get_positions()
-            total_exposure = sum(
-                p.size * p.avg_entry_price for p in positions
-            )
-            equity = balance + total_exposure
-        exposure = equity - balance + trade_cost
-        exposure_pct = float(exposure / equity) * 100 if equity > 0 else 0
-        if exposure_pct > self._max_exposure_pct:
-            return RiskCheckResult(
-                allowed=False,
-                reason=(
-                    f"Exposure {exposure_pct:.0f}% "
-                    f"of equity (limit {self._max_exposure_pct:.0f}%)"
-                ),
-            )
-
-        # Rate limit check
-        now = time.monotonic()
-        self._recent_orders = [
-            t for t in self._recent_orders if now - t < 60
-        ]
-        if len(self._recent_orders) >= self._max_orders_per_min:
-            return RiskCheckResult(
-                allowed=False,
-                reason=f"Rate limit: {len(self._recent_orders)}/min",
-            )
-
-        return RiskCheckResult(allowed=True)
-
-    def record_order(self) -> None:
-        """Record that an order was placed (for rate limiting)."""
-        self._recent_orders.append(time.monotonic())
-
-
 class CircuitBreaker:
-    """Circuit breakers for automated risk management.
-
-    Tracks round-level wins/losses and daily P&L to trigger cool-offs
-    and stop-trading conditions. State persists to disk so Docker restarts
-    don't reset the breaker mid-day.
-
-    Conditions:
-        - 3 consecutive round losses -> skip next round
-        - Daily loss > daily_loss_limit_pct of day-start balance -> stop for day
-        - Total drawdown > dynamic threshold from ATH -> kill switch (24h pause)
+    """Automated risk breakers with on-disk state.
 
     Dynamic drawdown: at small balances (<$500) a single loss with full
     allocation can wipe 50% equity. Drawdown limit scales with balance
     so the bot survives early variance but tightens as capital grows:
-        <$500:  70%    (survive Phase 1 variance)
+        <$500:   70%    (survive Phase 1 variance)
         $500-1k: 60%
         $1k-5k:  50%
-        $5k+:    40%   (protect real capital)
+        $5k+:    40%    (protect real capital)
     """
 
     # (min_balance, drawdown_pct) — checked top-down
@@ -286,7 +101,6 @@ class CircuitBreaker:
                     today, saved_date,
                 )
                 return False
-            # Same day — restore state
             self._date = saved_date
             dsb = state.get("day_start_balance")
             self._day_start_balance = Decimal(dsb) if dsb else None
@@ -312,11 +126,9 @@ class CircuitBreaker:
         restored = self._load_state()
         if restored:
             # Same day: keep stopped_for_day and consecutive_losses from disk.
-            # Update ATH if current balance is higher.
             if balance > self._all_time_high:
                 self._all_time_high = balance
             return
-        # New day or no saved state — fresh start
         self._reset_for_new_day(balance)
 
     def _reset_for_new_day(self, balance: Decimal) -> None:
@@ -349,11 +161,7 @@ class CircuitBreaker:
         self._save_state()
 
     def _effective_drawdown_pct(self, balance: Decimal) -> float:
-        """Return the drawdown limit for the current balance tier.
-
-        When dynamic_drawdown is enabled, smaller balances get a wider
-        limit so the bot survives early Phase-1 variance.
-        """
+        """Return the drawdown limit for the current balance tier."""
         if not self._dynamic_drawdown:
             return self._max_drawdown_pct
         for threshold, pct in self.DRAWDOWN_TIERS:
@@ -377,11 +185,9 @@ class CircuitBreaker:
             )
             self._reset_for_new_day(current_balance)
 
-        # Update ATH
         if current_balance > self._all_time_high:
             self._all_time_high = current_balance
 
-        # Daily loss check
         if self._day_start_balance is not None and self._day_start_balance > 0:
             daily_loss_pct = (
                 (self._day_start_balance - current_balance) / self._day_start_balance
@@ -394,7 +200,6 @@ class CircuitBreaker:
                     daily_loss_pct, self._daily_loss_limit_pct,
                 )
 
-        # Total drawdown check — limit scales with balance when dynamic
         if self._all_time_high > 0:
             drawdown_pct = (
                 (self._all_time_high - current_balance) / self._all_time_high
@@ -428,6 +233,4 @@ class CircuitBreaker:
         self._consecutive_losses = 0
         self._skip_next_round = False
         self._save_state()
-        logger.info(
-            "Circuit breaker: ATH reset to $%s", current_balance,
-        )
+        logger.info("Circuit breaker: ATH reset to $%s", current_balance)

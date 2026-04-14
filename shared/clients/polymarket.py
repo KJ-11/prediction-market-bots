@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from shared.utils.retry import http_retry
 
 logger = logging.getLogger(__name__)
+
+ET = ZoneInfo("America/New_York")  # Handles EST/EDT automatically
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 
@@ -110,7 +113,6 @@ class PolymarketClient:
         Format: {fullname}-up-or-down-{month}-{day}-{year}-{hour}{am/pm}-et
         The hour in the slug is the *start* of the window in Eastern Time.
         """
-        ET = timezone(timedelta(hours=-4))  # EDT (summer), adjust if needed
         now_et = datetime.now(ET)
         # Round down to current hour boundary, then apply offset
         window_start = now_et.replace(

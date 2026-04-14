@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 
 BASE = Path(__file__).resolve().parent.parent
-KALSHI_DIR = BASE / "data" / "rounds"
+KALSHI_DIR = BASE / "data" / "rounds" / "kalshi"
 PM_DIR = BASE / "data" / "rounds" / "polymarket"
 
 ZONES = [

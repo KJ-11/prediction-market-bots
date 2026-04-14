@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from bots.kalshi_whale.sizing import kalshi_fee
+from shared.fees import kalshi_fee
 
 logger = logging.getLogger(__name__)
 

@@ -1,13 +1,14 @@
 """Kalshi execution engine.
 
-Maps OrderRequest to Kalshi's POST /portfolio/orders API.
-Kalshi order fields: ticker, side (yes/no), action (buy/sell), count (int),
-yes_price (1-99 cents). No "type" field — market orders removed Feb 2026.
-Uses time_in_force="immediate_or_cancel" (IOC) so orders fill instantly
-or cancel — no resting orders.
+Maps OrderRequest to Kalshi's POST /portfolio/orders API (v2).
 
-Kalshi response fields (cents): yes_price, no_price, fill_count,
-taker_fill_cost, taker_fees. Status: resting, canceled, executed.
+Order fields we send: ticker, side (yes/no), action (buy/sell), count (int),
+yes_price (1–99 cents), time_in_force="immediate_or_cancel". IOC so orders
+fill instantly or cancel — no resting orders on the book.
+
+Response fields we read (v2, dollar-denominated): fill_count_fp (float string
+like "31.00"), taker_fill_cost_dollars, taker_fees_dollars.
+Status values: resting, canceled, executed.
 """
 
 from __future__ import annotations
@@ -32,58 +33,13 @@ from shared.utils.decimals import dec
 logger = logging.getLogger(__name__)
 
 
-def _map_kalshi_status(status: str) -> OrderStatus:
-    mapping = {
+class KalshiExecutionEngine(AbstractExecutionEngine):
+    _STATUS_MAP = {
         "resting": OrderStatus.OPEN,
         "canceled": OrderStatus.CANCELLED,
         "executed": OrderStatus.FILLED,
     }
-    return mapping.get(status, OrderStatus.PENDING)
 
-
-def _get_fill_count(result: dict) -> int:
-    """Extract fill count from Kalshi response.
-
-    Kalshi API returns fill_count_fp (current, float string like "31.00")
-    or fill_count (legacy, int). Handle both.
-    """
-    count = result.get("fill_count_fp") or result.get("fill_count") or 0
-    return int(float(count))
-
-
-def _compute_fill_price(result: dict) -> Decimal | None:
-    """Compute average fill price from Kalshi response fields.
-
-    Kalshi's taker_fill_cost represents the actual cost paid, regardless
-    of YES/NO side. Dividing by fill count gives the correct per-contract
-    price directly — no YES/NO conversion needed.
-
-    Handles dollar-denominated (current) and cent-denominated (legacy) fields.
-    """
-    fill_count = _get_fill_count(result)
-    if not fill_count:
-        return None
-
-    # Prefer dollar-denominated fields (current API)
-    cost_dollars = result.get("taker_fill_cost_dollars")
-    if cost_dollars is not None:
-        cost_dec = Decimal(str(cost_dollars))
-        if cost_dec == 0:
-            return None
-        return cost_dec / Decimal(str(fill_count))
-
-    # Legacy cent-denominated fields
-    taker_fill_cost = result.get("taker_fill_cost", 0)
-    if not taker_fill_cost:
-        return None
-    return (
-        Decimal(str(taker_fill_cost))
-        / Decimal(str(fill_count))
-        / Decimal("100")
-    )
-
-
-class KalshiExecutionEngine(AbstractExecutionEngine):
     def __init__(
         self,
         client: KalshiClient,
@@ -91,6 +47,35 @@ class KalshiExecutionEngine(AbstractExecutionEngine):
     ) -> None:
         self._client = client
         self._price_cushion_cents = price_cushion_cents
+
+    @staticmethod
+    def _map_status(status: str) -> OrderStatus:
+        return KalshiExecutionEngine._STATUS_MAP.get(status, OrderStatus.PENDING)
+
+    @staticmethod
+    def _get_fill_count(result: dict) -> int:
+        """Extract fill count from Kalshi response.
+
+        fill_count_fp is a float string like "31.00"; int(float(...)) handles that.
+        """
+        return int(float(result.get("fill_count_fp") or 0))
+
+    @staticmethod
+    def _compute_fill_price(result: dict) -> Decimal | None:
+        """Compute average fill price from Kalshi response fields.
+
+        taker_fill_cost_dollars is the actual cost paid, regardless of YES/NO
+        side. Dividing by fill count gives the correct per-contract price
+        directly — no YES/NO conversion needed.
+        """
+        fill_count = KalshiExecutionEngine._get_fill_count(result)
+        cost = result.get("taker_fill_cost_dollars")
+        if not fill_count or cost is None:
+            return None
+        cost_dec = Decimal(str(cost))
+        if cost_dec == 0:
+            return None
+        return cost_dec / Decimal(str(fill_count))
 
     async def place_order(self, order: OrderRequest) -> OrderResponse:
         """Place a Kalshi IOC order with price cushion.
@@ -141,14 +126,10 @@ class KalshiExecutionEngine(AbstractExecutionEngine):
 
         try:
             result = await self._client.place_order(kalshi_order)
-            status = _map_kalshi_status(result.get("status", ""))
-            fill_count = _get_fill_count(result)
-            fill_price = _compute_fill_price(result)
-            taker_fees = (
-                result.get("taker_fees_dollars")
-                or result.get("taker_fees")
-                or 0
-            )
+            status = self._map_status(result.get("status", ""))
+            fill_count = self._get_fill_count(result)
+            fill_price = self._compute_fill_price(result)
+            taker_fees = result.get("taker_fees_dollars") or 0
 
             logger.info(
                 "Kalshi: order response status=%s fills=%d "
@@ -231,12 +212,12 @@ class KalshiExecutionEngine(AbstractExecutionEngine):
             result.append(OrderResponse(
                 order_id=o.get("order_id", ""),
                 market_id=o.get("ticker", ""),
-                status=_map_kalshi_status(o.get("status", "")),
+                status=self._map_status(o.get("status", "")),
                 side=Side.BUY if o.get("action") == "buy" else Side.SELL,
                 outcome=Outcome.YES if o.get("side") == "yes" else Outcome.NO,
                 price=dec(o.get("yes_price")) or Decimal("0"),
                 size=dec(o.get("remaining_count")) or Decimal("0"),
-                filled_size=dec(o.get("fill_count_fp") or o.get("fill_count")) or Decimal("0"),
+                filled_size=dec(o.get("fill_count_fp")) or Decimal("0"),
                 raw=o,
             ))
         return result

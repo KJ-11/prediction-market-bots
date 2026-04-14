@@ -12,12 +12,13 @@ pd.set_option("display.max_rows", 200)
 pd.set_option("display.max_columns", 20)
 pd.set_option("display.width", 140)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "rounds"
-PM_DIR = DATA_DIR / "polymarket"
+BASE = Path(__file__).resolve().parent.parent / "data" / "rounds"
+KALSHI_DIR = BASE / "kalshi"
+PM_DIR = BASE / "polymarket"
 
 
 def load_kalshi() -> pd.DataFrame:
-    files = sorted(glob.glob(str(DATA_DIR / "KX*.csv")))
+    files = sorted(glob.glob(str(KALSHI_DIR / "KX*.csv")))
     if not files:
         print("No Kalshi files found")
         return pd.DataFrame()

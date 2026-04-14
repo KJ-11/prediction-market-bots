@@ -18,13 +18,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from datetime import datetime, timedelta
+from collections.abc import Awaitable, Callable
+from datetime import datetime
 from decimal import Decimal
 
 from bots.kalshi_whale.discovery import Watchlist, discover_markets
 from bots.kalshi_whale.monitor import PositionMonitor, TrackedPosition
 from bots.kalshi_whale.signal import WhaleDetector
-from bots.kalshi_whale.sizing import compute_size, kalshi_fee
+from bots.kalshi_whale.sizing import compute_size
 from bots.kalshi_whale.strategy import WhaleConfig, WhaleSignal
 from bots.kalshi_whale.tracking import WhaleTracker
 from shared.alerts.manager import CST, AlertManager
@@ -32,8 +33,10 @@ from shared.clients.kalshi import KalshiClient
 from shared.config import Settings
 from shared.execution.kalshi import KalshiExecutionEngine
 from shared.execution.paper import PaperExecutionEngine
+from shared.fees import kalshi_fee
 from shared.risk import CircuitBreaker, KillSwitch, KillSwitchTriggered, RiskLimits
 from shared.runner import BotRunner
+from shared.summary import midnight_summary_loop
 from shared.types import OrderRequest, OrderStatus, Outcome, PriceUpdate, Side
 from shared.utils.logging import setup_logging
 
@@ -96,6 +99,199 @@ async def _discovery_loop(
             pass
 
 
+def _event_already_entered(
+    signal: WhaleSignal,
+    entered_events: set,
+    watchlist: Watchlist,
+) -> str | None:
+    """Return the event_ticker if this signal would re-enter an event we already
+    traded, else return None. Prevents betting both sides of the same game."""
+    wl_market = watchlist.get(signal.market_ticker)
+    event_ticker = wl_market.event_ticker if wl_market else ""
+    if event_ticker and event_ticker in entered_events:
+        return event_ticker
+    return None
+
+
+async def _pass_risk_gates(
+    signal: WhaleSignal,
+    engine,
+    kill_switch: KillSwitch,
+    breaker: CircuitBreaker,
+    monitor: PositionMonitor,
+    config: WhaleConfig,
+    alerts: AlertManager,
+) -> tuple[Decimal, Decimal] | None:
+    """Run kill switch + circuit breaker + concurrency checks.
+
+    Returns (balance, equity) if all gates pass, None if any reject.
+    Side-effects: sends kill-switch alerts and handles the 24h drawdown pause.
+    """
+    if monitor.open_count >= config.max_concurrent:
+        logger.info(
+            "Signal skipped: max concurrent positions (%d/%d)",
+            monitor.open_count, config.max_concurrent,
+        )
+        return None
+
+    balance, equity = await _fetch_balance_and_equity(engine)
+
+    try:
+        kill_switch.check()
+    except KillSwitchTriggered as e:
+        logger.warning("KILL SWITCH: %s", e)
+        await alerts.kill_switch_triggered(str(e))
+        return None
+
+    try:
+        breaker.check(equity)
+    except KillSwitchTriggered as e:
+        logger.warning("DRAWDOWN PAUSE: %s — pausing 24h", e)
+        await alerts.kill_switch_triggered(f"24h pause: {e}")
+        await asyncio.sleep(86400)
+        _, new_equity = await _fetch_balance_and_equity(engine)
+        breaker.reset_ath(new_equity)
+        breaker.set_day_start_balance(new_equity)
+        return None
+
+    if breaker.stopped_for_day:
+        logger.info("Signal skipped: circuit breaker stopped for day")
+        return None
+
+    if breaker.should_skip_round:
+        logger.info("Signal skipped: circuit breaker skip")
+        breaker.clear_skip()
+        return None
+
+    return balance, equity
+
+
+async def _execute_entry(
+    signal: WhaleSignal,
+    balance: Decimal,
+    equity: Decimal,
+    config: WhaleConfig,
+    engine,
+    kill_switch: KillSwitch,
+    risk: RiskLimits,
+    monitor: PositionMonitor,
+    tracker: WhaleTracker,
+    alerts: AlertManager,
+) -> bool:
+    """Size, risk-check, place order, log. Returns True if a fill landed."""
+    open_slots = config.max_concurrent - monitor.open_count
+    slot_balance = balance / Decimal(str(open_slots)) if open_slots > 0 else balance
+    size = compute_size(signal.best_ask, slot_balance)
+    if size <= 0:
+        logger.info(
+            "Signal skipped: size=0 (bal=$%.2f, slot=$%.2f)",
+            balance, slot_balance,
+        )
+        return False
+
+    outcome = Outcome.YES if signal.side == "yes" else Outcome.NO
+    order = OrderRequest(
+        market_id=signal.market_ticker,
+        side=Side.BUY,
+        outcome=outcome,
+        price=signal.best_ask,
+        size=Decimal(str(size)),
+    )
+
+    risk_result = await risk.check(order, engine, balance=balance, equity=equity)
+    if not risk_result.allowed:
+        logger.info("Signal rejected by risk: %s", risk_result.reason)
+        return False
+
+    logger.info(
+        "ENTERING: %s %s @ %.2f x%d (bal=$%.2f)",
+        signal.market_ticker, signal.side, signal.best_ask, size, balance,
+    )
+
+    try:
+        resp = await engine.place_order(order)
+    except Exception as e:
+        logger.error("Entry order failed: %s: %s", signal.market_ticker, e)
+        kill_switch.record_error()
+        return False
+
+    kill_switch.clear_errors()
+    risk.record_order()
+
+    if resp.status != OrderStatus.FILLED:
+        logger.warning(
+            "Entry not filled: %s status=%s",
+            signal.market_ticker, resp.status.value,
+        )
+        tracker.log_entry(
+            market_ticker=signal.market_ticker,
+            side="buy",
+            outcome=signal.side,
+            ideal_price=signal.best_ask,
+            actual_price=None,
+            contracts=size,
+            order_id=resp.order_id,
+            order_status=resp.status.value,
+        )
+        return False
+
+    fill_price = resp.avg_fill_price or signal.best_ask
+    filled_size = int(resp.filled_size)
+    if filled_size <= 0:
+        logger.warning(
+            "IOC executed but 0 fills: %s — no liquidity at price",
+            signal.market_ticker,
+        )
+        return False
+
+    entry_fee = kalshi_fee(fill_price, filled_size)
+    cost = fill_price * filled_size
+
+    monitor.add_position(TrackedPosition(
+        market_ticker=signal.market_ticker,
+        side=signal.side,
+        entry_price=fill_price,
+        size=filled_size,
+        order_id=resp.order_id,
+    ))
+
+    balance_after, equity_after = await _fetch_balance_and_equity(engine)
+
+    tracker.log_entry(
+        market_ticker=signal.market_ticker,
+        side="buy",
+        outcome=signal.side,
+        ideal_price=signal.best_ask,
+        actual_price=fill_price,
+        contracts=filled_size,
+        order_id=resp.order_id,
+        order_status=resp.status.value,
+        balance_after=balance_after,
+    )
+
+    await alerts.whale_entry(
+        ticker=signal.market_ticker,
+        side=signal.side,
+        price=fill_price,
+        size=filled_size,
+        cost=cost,
+        fee=entry_fee,
+        whale_count=signal.whale_count,
+        consensus_pct=signal.consensus_pct,
+        balance=balance_after,
+        equity=equity_after,
+        whale_avg_price=signal.whale_avg_price,
+        signal_ask=signal.best_ask,
+    )
+
+    logger.info(
+        "ENTERED: %s %s @ %.2f x%d bal=$%.2f eq=$%.2f",
+        signal.market_ticker, signal.side, fill_price, filled_size,
+        balance_after, equity_after,
+    )
+    return True
+
+
 async def _signal_consumer(
     signal_queue: asyncio.Queue[WhaleSignal],
     config: WhaleConfig,
@@ -110,8 +306,7 @@ async def _signal_consumer(
     runner: BotRunner,
     daily_stats: dict,
 ) -> None:
-    """Consume whale signals, apply sizing + risk checks, enter positions."""
-    # Track entered event_tickers to avoid betting both sides of the same game
+    """Consume whale signals: dedup → risk gates → sizing/execution."""
     entered_events: set[str] = set()
 
     while not runner.shutdown_requested:
@@ -121,183 +316,33 @@ async def _signal_consumer(
             continue
 
         daily_stats["signals"] += 1
-
         logger.info(
             "Processing signal: %s %s — %d whales, %.0f%% consensus",
             signal.market_ticker, signal.side, signal.whale_count,
             signal.consensus_pct * 100,
         )
 
-        # Dedup: don't bet on two markets in the same event (e.g. both teams)
-        wl_market = watchlist.get(signal.market_ticker)
-        event_ticker = wl_market.event_ticker if wl_market else ""
-        if event_ticker and event_ticker in entered_events:
-            logger.info(
-                "Signal skipped: already entered event %s",
-                event_ticker,
-            )
+        dup_event = _event_already_entered(signal, entered_events, watchlist)
+        if dup_event is not None:
+            logger.info("Signal skipped: already entered event %s", dup_event)
             continue
 
-        # Check concurrent position limit
-        if monitor.open_count >= config.max_concurrent:
-            logger.info(
-                "Signal skipped: max concurrent positions (%d/%d)",
-                monitor.open_count, config.max_concurrent,
-            )
-            continue
-
-        # Fetch live balance + equity from real Kalshi positions every time
-        balance, equity = await _fetch_balance_and_equity(engine)
-
-        # Kill switch — file-based + error-based only
-        try:
-            kill_switch.check()
-        except KillSwitchTriggered as e:
-            logger.warning("KILL SWITCH: %s", e)
-            await alerts.kill_switch_triggered(str(e))
-            continue
-
-        # Circuit breaker — checks equity for daily loss + drawdown
-        try:
-            breaker.check(equity)
-        except KillSwitchTriggered as e:
-            logger.warning("DRAWDOWN PAUSE: %s — pausing 24h", e)
-            await alerts.kill_switch_triggered(f"24h pause: {e}")
-            await asyncio.sleep(86400)
-            _, new_equity = await _fetch_balance_and_equity(engine)
-            breaker.reset_ath(new_equity)
-            breaker.set_day_start_balance(new_equity)
-            continue
-
-        if breaker.stopped_for_day:
-            logger.info("Signal skipped: circuit breaker stopped for day")
-            continue
-
-        if breaker.should_skip_round:
-            logger.info("Signal skipped: circuit breaker skip")
-            breaker.clear_skip()
-            continue
-
-        # Compute position size from live balance
-        open_slots = config.max_concurrent - monitor.open_count
-        slot_balance = balance / Decimal(str(open_slots)) if open_slots > 0 else balance
-        size = compute_size(signal.best_ask, slot_balance)
-        if size <= 0:
-            logger.info(
-                "Signal skipped: size=0 (bal=$%.2f, slot=$%.2f)",
-                balance, slot_balance,
-            )
-            continue
-
-        # Risk check (also fetches live balance internally)
-        outcome = Outcome.YES if signal.side == "yes" else Outcome.NO
-        order = OrderRequest(
-            market_id=signal.market_ticker,
-            side=Side.BUY,
-            outcome=outcome,
-            price=signal.best_ask,
-            size=Decimal(str(size)),
+        gates = await _pass_risk_gates(
+            signal, engine, kill_switch, breaker, monitor, config, alerts,
         )
-
-        risk_result = await risk.check(
-            order, engine, balance=balance, equity=equity,
-        )
-        if not risk_result.allowed:
-            logger.info("Signal rejected by risk: %s", risk_result.reason)
+        if gates is None:
             continue
+        balance, equity = gates
 
-        # Execute entry
-        logger.info(
-            "ENTERING: %s %s @ %.2f x%d (bal=$%.2f)",
-            signal.market_ticker, signal.side, signal.best_ask, size, balance,
+        entered = await _execute_entry(
+            signal, balance, equity, config, engine,
+            kill_switch, risk, monitor, tracker, alerts,
         )
-
-        try:
-            resp = await engine.place_order(order)
-        except Exception as e:
-            logger.error("Entry order failed: %s: %s", signal.market_ticker, e)
-            kill_switch.record_error()
-            continue
-
-        kill_switch.clear_errors()
-        risk.record_order()
-
-        if resp.status != OrderStatus.FILLED:
-            logger.warning(
-                "Entry not filled: %s status=%s",
-                signal.market_ticker, resp.status.value,
-            )
-            tracker.log_entry(
-                market_ticker=signal.market_ticker,
-                side="buy",
-                outcome=signal.side,
-                ideal_price=signal.best_ask,
-                actual_price=None,
-                contracts=size,
-                order_id=resp.order_id,
-                order_status=resp.status.value,
-            )
-            continue
-
-        # Entry filled
-        fill_price = resp.avg_fill_price or signal.best_ask
-        filled_size = int(resp.filled_size)
-
-        if filled_size <= 0:
-            logger.warning(
-                "IOC executed but 0 fills: %s — no liquidity at price",
-                signal.market_ticker,
-            )
-            continue
-        entry_fee = kalshi_fee(fill_price, filled_size)
-        cost = fill_price * filled_size
-
-        monitor.add_position(TrackedPosition(
-            market_ticker=signal.market_ticker,
-            side=signal.side,
-            entry_price=fill_price,
-            size=filled_size,
-            order_id=resp.order_id,
-        ))
-
-        balance, equity = await _fetch_balance_and_equity(engine)
-
-        tracker.log_entry(
-            market_ticker=signal.market_ticker,
-            side="buy",
-            outcome=signal.side,
-            ideal_price=signal.best_ask,
-            actual_price=fill_price,
-            contracts=filled_size,
-            order_id=resp.order_id,
-            order_status=resp.status.value,
-            balance_after=balance,
-        )
-
-        await alerts.whale_entry(
-            ticker=signal.market_ticker,
-            side=signal.side,
-            price=fill_price,
-            size=filled_size,
-            cost=cost,
-            fee=entry_fee,
-            whale_count=signal.whale_count,
-            consensus_pct=signal.consensus_pct,
-            balance=balance,
-            equity=equity,
-            whale_avg_price=signal.whale_avg_price,
-            signal_ask=signal.best_ask,
-        )
-
-        daily_stats["trades"] += 1
-        if event_ticker:
-            entered_events.add(event_ticker)
-
-        logger.info(
-            "ENTERED: %s %s @ %.2f x%d bal=$%.2f eq=$%.2f",
-            signal.market_ticker, signal.side, fill_price, filled_size,
-            balance, equity,
-        )
+        if entered:
+            daily_stats["trades"] += 1
+            wl_market = watchlist.get(signal.market_ticker)
+            if wl_market and wl_market.event_ticker:
+                entered_events.add(wl_market.event_ticker)
 
 
 async def _results_consumer(
@@ -331,23 +376,15 @@ async def _results_consumer(
         )
 
 
-async def _midnight_summary_task(
+def _make_whale_summary_fn(
     alerts: AlertManager,
     engine,
     daily_stats: dict,
-) -> None:
-    """Fire daily summary at midnight CST, then reset stats."""
-    while True:
-        now = datetime.now(CST)
-        tomorrow = (now + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0,
-        )
-        wait_seconds = (tomorrow - now).total_seconds()
-        await asyncio.sleep(wait_seconds)
-
+) -> Callable[[], Awaitable[None]]:
+    """Build the per-midnight summary callback for the whale bot."""
+    async def summary_fn() -> None:
         balance = await engine.get_balance()
-        date_str = now.strftime("%b %-d")
-
+        date_str = datetime.now(CST).strftime("%b %-d")
         await alerts.daily_summary(
             date_str=date_str,
             trades=daily_stats["trades"],
@@ -356,11 +393,11 @@ async def _midnight_summary_task(
             balance=balance,
             total_signals=daily_stats["signals"],
         )
-
         daily_stats["trades"] = 0
         daily_stats["wins"] = 0
         daily_stats["pnl"] = Decimal("0")
         daily_stats["signals"] = 0
+    return summary_fn
 
 
 async def run_bot(
@@ -392,10 +429,10 @@ async def run_bot(
     initial_balance, initial_equity = await _fetch_balance_and_equity(engine)
 
     # Kill switch — file-based + error-based only.
-    # No capital loss kill; drawdown handled by circuit breaker with 24h pause.
+    # Capital-loss check disabled; drawdown handled by CircuitBreaker with 24h pause.
     kill_switch = KillSwitch(
         kill_file=settings.global_kill_file,
-        max_loss_pct=999.0,  # Effectively disabled
+        max_loss_pct=None,
         max_consecutive_errors=settings.max_consecutive_errors,
         initial_balance=initial_balance,
     )
@@ -497,7 +534,9 @@ async def run_bot(
             name="results-consumer",
         ),
         asyncio.create_task(
-            _midnight_summary_task(alerts, engine, daily_stats),
+            midnight_summary_loop(
+                _make_whale_summary_fn(alerts, engine, daily_stats),
+            ),
             name="midnight-summary",
         ),
     ]

@@ -16,19 +16,20 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from bots.kalshi_whale.sizing import kalshi_fee as _kalshi_fee
 from bots.kalshi_whale.strategy import WhaleConfig
 from bots.kalshi_whale.tracking import WhaleTracker
 from shared.alerts.manager import AlertManager
 from shared.clients.kalshi import KalshiClient
 from shared.execution.base import AbstractExecutionEngine
 from shared.execution.paper import PaperExecutionEngine
+from shared.fees import kalshi_fee
 from shared.types import OrderRequest, Outcome, PriceUpdate, Side
 
 logger = logging.getLogger(__name__)
 
-# Don't sell below this price — slippage too extreme, hold to settlement.
-HARD_FLOOR = Decimal("0.05")
+# Don't trigger a stop-loss below this bid — books get illiquid under 5¢
+# and selling would eat more than we'd lose by holding to settlement.
+STOP_LOSS_PRICE_FLOOR = Decimal("0.05")
 
 # If no WS price update for a position in this many seconds, fetch via REST.
 STALE_PRICE_SECS = 60.0
@@ -195,10 +196,10 @@ class PositionMonitor:
             if ticker not in self._positions:
                 return
 
-            if trigger_bid <= HARD_FLOOR:
+            if trigger_bid <= STOP_LOSS_PRICE_FLOOR:
                 logger.warning(
                     "Stop-loss skipped (hard floor): %s bid=$%.2f <= $%.2f",
-                    ticker, trigger_bid, HARD_FLOOR,
+                    ticker, trigger_bid, STOP_LOSS_PRICE_FLOOR,
                 )
                 return
 
@@ -233,8 +234,8 @@ class PositionMonitor:
             fill_price = resp.avg_fill_price or trigger_bid
 
             # P&L: proceeds - cost - fees
-            entry_fee = _kalshi_fee(pos.entry_price, pos.size)
-            exit_fee = _kalshi_fee(fill_price, filled_size)
+            entry_fee = kalshi_fee(pos.entry_price, pos.size)
+            exit_fee = kalshi_fee(fill_price, filled_size)
             pnl = (
                 (fill_price - pos.entry_price) * filled_size
                 - entry_fee - exit_fee
@@ -352,11 +353,11 @@ class PositionMonitor:
                 won = pos.side == result
 
                 # Fee-accurate P&L
-                entry_fee = _kalshi_fee(pos.entry_price, pos.size)
+                entry_fee = kalshi_fee(pos.entry_price, pos.size)
                 if won:
                     payout = Decimal(str(pos.size))  # $1 per contract
                     profit_per = Decimal("1") - pos.entry_price
-                    exit_fee = _kalshi_fee(profit_per, pos.size)
+                    exit_fee = kalshi_fee(profit_per, pos.size)
                     pnl = payout - (pos.entry_price * pos.size) - entry_fee - exit_fee
                 else:
                     exit_fee = Decimal("0")

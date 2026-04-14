@@ -1,5 +1,3 @@
-# Position sizing. Kelly criterion with Kalshi fee model.
-
 """Position sizing — fractional Kelly criterion for Kalshi contracts."""
 
 from __future__ import annotations
@@ -8,18 +6,9 @@ import logging
 from decimal import Decimal
 from enum import Enum
 
+from shared.fees import kalshi_fee
+
 logger = logging.getLogger(__name__)
-
-# Kalshi taker fee: round_up(0.07 * C * P * (1 - P))
-# Rounding applies to the whole order, not per contract.
-FEE_COEFFICIENT = Decimal("0.07")
-ONE_CENT = Decimal("0.01")
-
-
-def kalshi_fee(price: Decimal, contracts: int = 1) -> Decimal:
-    """Calculate Kalshi taker fee for an order (rounded up to next cent)."""
-    raw = FEE_COEFFICIENT * contracts * price * (Decimal("1") - price)
-    return raw.quantize(ONE_CENT, rounding="ROUND_CEILING")
 
 
 class SizingMode(str, Enum):
