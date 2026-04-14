@@ -19,7 +19,7 @@ services:
     env_file: .env
     environment:
       - TZ=America/Chicago
-      - PAPER_TRADING=false
+      - PAPER_TRADING=true
     volumes:
       - ./data:/app/data
 

@@ -379,9 +379,9 @@ async def run_bot(
 
     # Execution engine
     if settings.paper_trading:
-        engine = PaperExecutionEngine(initial_balance=Decimal("100"))
+        engine = PaperExecutionEngine(initial_balance=Decimal("300"))
         mode = "PAPER"
-        logger.info("Mode: PAPER trading ($100 initial)")
+        logger.info("Mode: PAPER trading ($300 initial)")
     else:
         engine = KalshiExecutionEngine(
             client, price_cushion_cents=settings.price_cushion_cents,
