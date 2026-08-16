@@ -457,7 +457,7 @@ instance `<VM_NAME>`, type `e2-small` (2 vCPU / 2 GB).
 rsync -avz --exclude='.env' --exclude='venv/' --exclude='data/' \
   --exclude='__pycache__/' --exclude='.git/' --exclude='*.pyc' \
   -e "ssh -i ~/.ssh/google_compute_engine" \
-  ./ kj@<VM_IP>:~/prediction-market-bots/
+  ./ <SSH_USER>@<VM_IP>:~/prediction-market-bots/
 
 gcloud compute ssh <VM_NAME> --zone=<GCP_ZONE> --project=<GCP_PROJECT> -- \
   'cd ~/prediction-market-bots && docker compose up -d --build'

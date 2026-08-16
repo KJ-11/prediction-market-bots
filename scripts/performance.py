@@ -410,8 +410,16 @@ def print_report(
 
 def sync_data() -> None:
     """Rsync alert logs, trade logs, and round snapshots from VM."""
+    vm_host = Settings().kalshi_vm_host
+    if not vm_host:
+        print(
+            "KALSHI_VM_HOST is not set. Add it to .env as user@host "
+            "(e.g. KALSHI_VM_HOST=me@203.0.113.10) to use --sync."
+        )
+        sys.exit(1)
+
     print("Syncing data from VM...")
-    remote = "kj@<VM_IP>:~/prediction-market-bots/data"
+    remote = f"{vm_host}:~/prediction-market-bots/data"
     ssh_opts = ["-e", "ssh -i ~/.ssh/google_compute_engine"]
     syncs = [
         (f"{remote}/alerts/", str(ALERTS_DIR) + "/"),

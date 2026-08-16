@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     price_cushion_cents: int = 2  # Bid above ask to absorb price movement (IOC fills at best)
 
     # ---- Operational ----
+    kalshi_vm_host: str = ""  # rsync/ssh target for the deployed VM, e.g. "user@1.2.3.4"
     paper_trading: bool = True  # Start in paper mode by default
     log_format: str = "human"  # "human" or "json"
     log_level: str = "INFO"

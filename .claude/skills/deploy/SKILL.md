@@ -13,7 +13,7 @@ rsync -avz --exclude='.env' --exclude='venv/' --exclude='data/' \
   --exclude='__pycache__/' --exclude='.git/' --exclude='*.pyc' \
   -e "ssh -i ~/.ssh/google_compute_engine" \
   /Users/kj/Code/Personal/prediction-market-bots/ \
-  kj@<VM_IP>:~/prediction-market-bots/
+  <SSH_USER>@<VM_IP>:~/prediction-market-bots/
 ```
 
 3. **Rebuild Docker services on VM**:

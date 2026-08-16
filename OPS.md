@@ -9,7 +9,7 @@ Quick reference for the bot + collectors running on GCP.
 gcloud compute ssh <VM_NAME> --zone=<GCP_ZONE> --project=<GCP_PROJECT>
 
 # Direct SSH alternative
-ssh -i ~/.ssh/google_compute_engine kj@<VM_IP>
+ssh -i ~/.ssh/google_compute_engine <SSH_USER>@<VM_IP>
 ```
 
 All commands below assume the gcloud form. The prefix is abbreviated as `SSH --` where it would repeat.
@@ -82,7 +82,7 @@ rsync -avz --exclude='.env' --exclude='venv/' --exclude='data/' \
   --exclude='__pycache__/' --exclude='.git/' --exclude='*.pyc' \
   -e "ssh -i ~/.ssh/google_compute_engine" \
   /Users/kj/Code/Personal/prediction-market-bots/ \
-  kj@<VM_IP>:~/prediction-market-bots/
+  <SSH_USER>@<VM_IP>:~/prediction-market-bots/
 
 SSH -- 'cd ~/prediction-market-bots && docker compose up -d --build'
 ```

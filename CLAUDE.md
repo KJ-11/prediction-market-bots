@@ -67,8 +67,8 @@ Two templates depending on market structure. Shared pieces: `discovery.py`, `str
 ## Deployment & Operations
 - **Deploy method: rsync to GCP VM. NEVER use `git pull` on the VM.**
 - GCP VM: `<GCP_ZONE>`, `<VM_IP>`, e2-small (2GB RAM)
-- GCP project: `<GCP_PROJECT>` (named "Bots"), account: `kshjhun@gmail.com`
-  - NOT `profitlabs` — that is a different project with a different account (`<CONTACT_EMAIL>`)
+- GCP project: `<GCP_PROJECT>` (named "Bots"), account: `<GCP_ACCOUNT>`
+  - Make sure the active gcloud account/project is this one, not another project on the same machine.
 - **GCP config:** Always use `gcloud config configurations activate bots` before running gcloud commands. Verify with `gcloud config configurations list`.
 - Docker services: see `docker-compose.yml`. Whale bot + Kalshi collectors (4 coins) + Polymarket collectors (4 coins × 4 durations). Collectors are currently paused; re-enable by `docker compose up -d <name>`.
 - See `OPS.md` for full operations guide (health checks, logs, data, deploy, emergency controls)
@@ -99,7 +99,7 @@ Two templates depending on market structure. Shared pieces: `discovery.py`, `str
 
 ## Git & Accounts
 
-- **GCP:** `gcloud config configurations activate bots` → `kshjhun@gmail.com` / project `<GCP_PROJECT>`. **NOT** the ProfitLabs account.
+- **GCP:** `gcloud config configurations activate bots` → `<GCP_ACCOUNT>` / project `<GCP_PROJECT>`. Verify the active configuration before running gcloud commands.
 - **Supabase:** Not used in this project.
 
 ## Vault Integration
