@@ -6,11 +6,13 @@ Built as a shared-infrastructure monorepo: each bot lives under `bots/<name>/` a
 
 ## Status
 
-Running one strategy in production (paper mode) and collecting market data for the next.
+No longer running. The whale strategy traded on Kalshi through March and April 2026, then I switched it off and tore down the infrastructure. The code is here as a record of how it worked.
 
-- **`bots/kalshi_whale/`** — follows large Kalshi traders ("whales") into sports + economics markets. Currently paper-trading a $300 bankroll on GCP.
-- **`bots/kalshi_crypto/`** — reference implementation for 15-minute Kalshi crypto markets. Paused; retained as a template.
-- **Collectors** — Kalshi + Polymarket round snapshots, feeding future strategy work. Paused; see `scripts/collect_rounds.py`, `scripts/collect_polymarket.py`.
+- **`bots/kalshi_whale/`** - follows large Kalshi traders ("whales") into sports and economics markets. The strategy that actually ran.
+- **`bots/kalshi_crypto/`** - reference implementation for 15-minute Kalshi crypto markets. Retained as a template.
+- **Collectors** - Kalshi and Polymarket round snapshots. See `scripts/collect_rounds.py`, `scripts/collect_polymarket.py`.
+
+Write-up: [kshitij-jhunjhunwala.com/build/kalshi](https://kshitij-jhunjhunwala.com/build/kalshi)
 
 ## Architecture
 

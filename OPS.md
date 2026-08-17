@@ -19,7 +19,7 @@ VM: `<VM_NAME>`, zone `<GCP_ZONE>`, project `<GCP_PROJECT>`, type `e2-small` (2 
 ## Services
 
 Defined in `docker-compose.yml`:
-- `whale` — `bots.kalshi_whale.main`, currently running in paper mode
+- `whale` - `bots.kalshi_whale.main`, the strategy that ran in production
 - `collector-{btc,eth,sol,xrp}` — Kalshi 15m round snapshots
 - `poly-{5m,15m,1h,4h}-{btc,eth,sol,xrp}` — Polymarket 4×4 = 16 collectors
 
